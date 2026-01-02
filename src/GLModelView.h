@@ -28,6 +28,7 @@ public:
     void setAssetRoot(const QString& assetRoot);
     void setVfs(const std::shared_ptr<class IVfs>& vfs);
     void resetView();
+    void setBackgroundAlpha(float alpha);
 
     // Animation / playback
     // Default = 1.0; clamped to [0.05, 10.0]
@@ -45,6 +46,7 @@ protected:
     void mousePressEvent(QMouseEvent* e) override;
     void mouseMoveEvent(QMouseEvent* e) override;
     void wheelEvent(QWheelEvent* e) override;
+    void mouseDoubleClickEvent(QMouseEvent* e) override;
     void keyPressEvent(QKeyEvent* e) override;
 
 private:
@@ -140,9 +142,11 @@ private:
     float distance_ = 6.0f;
     float near_ = 0.05f;
     float far_ = 2000.0f;
+    QVector3D panOffset_{0,0,0};
     bool wireframe_ = false;
     bool alphaTestEnabled_ = false;
     bool isGles_ = false;
+    float backgroundAlpha_ = 1.0f;
 
     // Model framing
     QVector3D modelCenter_{0,0,0};

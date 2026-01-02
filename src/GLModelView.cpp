@@ -318,6 +318,12 @@ void GLModelView::setPlaybackSpeed(float speed)
     playbackSpeed_ = clampf(speed, 0.05f, 10.0f);
 }
 
+void GLModelView::setBackgroundAlpha(float alpha)
+{
+    backgroundAlpha_ = clampf(alpha, 0.0f, 1.0f);
+    update();
+}
+
 void GLModelView::setAssetRoot(const QString& assetRoot)
 {
     assetRoot_ = assetRoot;
@@ -330,9 +336,11 @@ void GLModelView::setVfs(const std::shared_ptr<IVfs>& vfs)
 
 void GLModelView::resetView()
 {
-    yaw_ = 30.0f;
-    pitch_ = -25.0f;
-    distance_ = std::max(1.0f, modelRadius_ * 2.2f);
+    // Default to a front-facing view (War3 uses Z-up).
+    yaw_ = 0.0f;
+    pitch_ = 0.0f;
+    distance_ = std::max(0.5f, modelRadius_ * 1.2f);
+    panOffset_ = QVector3D(0, 0, 0);
     updateProjection(viewportW_, viewportH_);
     update();
 }
@@ -1185,9 +1193,12 @@ void GLModelView::updateStatusText()
 
 void GLModelView::paintGL()
 {
-    glViewport(0, 0, width(), height());
+    const float dpr = devicePixelRatioF();
+    const int fbw = int(width() * dpr);
+    const int fbh = int(height() * dpr);
+    glViewport(0, 0, fbw, fbh);
     setGlPhase("clear");
-    glClearColor(0.15f, 0.15f, 0.15f, 1.0f);
+    glClearColor(0.0f, 0.0f, 0.0f, backgroundAlpha_);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
     lastDrawCalls_ = 0;
@@ -1200,28 +1211,13 @@ void GLModelView::paintGL()
     view.translate(0, 0, -distance_);
     view.rotate(pitch_, 1, 0, 0);
     view.rotate(yaw_, 0, 1, 0);
-    view.translate(-modelCenter_);
+    view.translate(-(modelCenter_ + panOffset_));
 
     QMatrix4x4 modelM;
     modelM.setToIdentity();
 
     const QMatrix4x4 mvp = proj_ * view * modelM;
     const QMatrix3x3 normalMat = modelM.normalMatrix();
-
-    // --- Sanity triangle (verifies pipeline before model draw)
-    if (debugProgramReady_ && sanityVao_ != 0)
-    {
-        setGlPhase("sanity-triangle");
-        glDisable(GL_DEPTH_TEST);
-        debugProgram_.bind();
-        debugProgram_.setUniformValue("uMVP", mvp);
-        glBindVertexArray(sanityVao_);
-        glDrawArrays(GL_TRIANGLES, 0, 3);
-        glBindVertexArray(0);
-        debugProgram_.release();
-        glEnable(GL_DEPTH_TEST);
-        lastDrawCalls_ += 1;
-    }
 
     updateSkinning(lastGlobalTimeMs_);
 
@@ -1551,8 +1547,6 @@ void GLModelView::paintGL()
         particleProgram_.release();
     }
 
-    drawDebug(mvp);
-
     if (!fpsTimer_.isValid())
         fpsTimer_.start();
     fpsFrames_ += 1;
@@ -1591,6 +1585,23 @@ void GLModelView::mouseMoveEvent(QMouseEvent* e)
     const QPoint delta = e->pos() - lastMouse_;
     lastMouse_ = e->pos();
 
+    const bool panMode = (e->buttons() & Qt::RightButton) ||
+                         ((e->buttons() & Qt::LeftButton) && (e->modifiers() & Qt::ControlModifier));
+
+    if (panMode)
+    {
+        QMatrix4x4 rot;
+        rot.setToIdentity();
+        rot.rotate(yaw_, 0, 1, 0);
+        rot.rotate(pitch_, 1, 0, 0);
+        const QVector3D right = rot.mapVector(QVector3D(1, 0, 0));
+        const QVector3D up = rot.mapVector(QVector3D(0, 1, 0));
+        const float scale = std::max(0.001f, distance_ * 0.002f);
+        panOffset_ += (-right * float(delta.x()) + up * float(delta.y())) * scale;
+        update();
+        return;
+    }
+
     if (e->buttons() & Qt::LeftButton)
     {
         yaw_ += delta.x() * 0.4f;
@@ -1607,6 +1618,17 @@ void GLModelView::wheelEvent(QWheelEvent* e)
     distance_ = clampf(distance_, 0.25f, 10000.0f);
     updateProjection(viewportW_, viewportH_);
     update();
+}
+
+void GLModelView::mouseDoubleClickEvent(QMouseEvent* e)
+{
+    if (e->button() == Qt::LeftButton)
+    {
+        resetView();
+        e->accept();
+        return;
+    }
+    QOpenGLWidget::mouseDoubleClickEvent(e);
 }
 
 void GLModelView::keyPressEvent(QKeyEvent* e)

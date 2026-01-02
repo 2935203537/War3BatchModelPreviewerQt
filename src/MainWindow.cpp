@@ -1,4 +1,4 @@
-#include "MainWindow.h"
+﻿#include "MainWindow.h"
 
 #include <QApplication>
 #include <QFileDialog>
@@ -24,6 +24,9 @@
 #include <QSlider>
 #include <QProcess>
 #include <QDateTime>
+#include <QComboBox>
+#include <QGroupBox>
+#include <QFrame>
 #include <QtConcurrent/QtConcurrent>
 
 #include "GLModelView.h"
@@ -103,7 +106,6 @@ MainWindow::MainWindow(QWidget* parent)
 
     onWar3RootChanged();
 
-    // Default: prompt user to pick a folder.
     statusLabel_->setText("Choose a folder containing .mdx files.");
 }
 
@@ -148,7 +150,7 @@ void MainWindow::buildUi()
     war3Row->addWidget(btnWar3Browse_, 0);
     root->addLayout(war3Row);
 
-    // Split view: left list + right viewer
+    // Main area: left list + viewer + right panel
     auto* splitter = new QSplitter(Qt::Horizontal);
 
     auto* left = new QWidget();
@@ -183,35 +185,113 @@ void MainWindow::buildUi()
 
     splitter->addWidget(left);
 
-    viewer_ = new GLModelView();
-    splitter->addWidget(viewer_);
+    auto* viewerHost = new QWidget();
+    viewerHost->setStyleSheet("background: #000;");
+    auto* viewerHostLayout = new QVBoxLayout(viewerHost);
+    viewerHostLayout->setContentsMargins(0, 0, 0, 0);
+    viewerHostLayout->setSpacing(0);
 
+    auto* viewerFrame = new QFrame();
+    viewerFrame->setStyleSheet("QFrame { background: #000; border: none; }");
+    viewerFrame->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+    auto* viewerFrameLayout = new QVBoxLayout(viewerFrame);
+    viewerFrameLayout->setContentsMargins(0, 0, 0, 0);
+    viewerFrameLayout->setSpacing(0);
+
+    viewer_ = new GLModelView();
+    viewer_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+    viewerFrameLayout->addWidget(viewer_);
+
+    viewerHostLayout->addWidget(viewerFrame, 1);
+    splitter->addWidget(viewerHost);
+
+    auto* panel = new QFrame();
+    panel->setStyleSheet(
+        "QFrame { background: #f7f7f9; border-radius: 8px; }"
+        "QGroupBox { font-weight: 600; border: none; margin-top: 8px; }"
+        "QGroupBox::title { subcontrol-origin: margin; subcontrol-position: top left; padding: 2px 0; }"
+        "QPushButton { background: #2f2f33; color: #f2f2f2; border-radius: 6px; padding: 6px 10px; }"
+        "QPushButton:hover { background: #3a3a40; }"
+        "QComboBox, QLineEdit { background: #2f2f33; color: #f2f2f2; border-radius: 6px; padding: 4px 8px; }"
+        "QSlider::groove:horizontal { height: 6px; background: #dcdde1; border-radius: 3px; }"
+        "QSlider::handle:horizontal { width: 14px; margin: -4px 0; background: #5b8cff; border-radius: 7px; }"
+    );
+    panel->setFixedWidth(320);
+
+    auto* panelLayout = new QVBoxLayout(panel);
+    panelLayout->setContentsMargins(16, 16, 16, 16);
+    panelLayout->setSpacing(14);
+
+    lblModelName_ = new QLabel("No model loaded");
+    lblModelName_->setStyleSheet("font-weight: 600;");
+    lblModelName_->setWordWrap(true);
+    panelLayout->addWidget(lblModelName_);
+
+    auto* controlBox = new QGroupBox("Controls");
+    auto* controlLayout = new QVBoxLayout(controlBox);
+    controlLayout->setSpacing(8);
+
+    auto* animLabel = new QLabel("Animation");
+    auto* animCombo = new QComboBox();
+    animCombo->addItem("[0]Stand");
+    controlLayout->addWidget(animLabel);
+    controlLayout->addWidget(animCombo);
+
+    auto* teamLabel = new QLabel("Team Color");
+    auto* teamCombo = new QComboBox();
+    teamCombo->addItems({"[0]Red", "[1]Blue", "[2]Teal", "[3]Purple"});
+    controlLayout->addWidget(teamLabel);
+    controlLayout->addWidget(teamCombo);
+
+    auto* speedTitle = new QLabel("Playback Speed");
+    speedSlider_ = new QSlider(Qt::Horizontal);
+    speedSlider_->setRange(10, 300);
+    speedSlider_->setValue(100);
+    speedSlider_->setToolTip("Playback speed");
+    controlLayout->addWidget(speedTitle);
+    controlLayout->addWidget(speedSlider_);
+
+    auto* bgTitle = new QLabel("Background Alpha");
+    bgAlphaSlider_ = new QSlider(Qt::Horizontal);
+    bgAlphaSlider_->setRange(0, 100);
+    bgAlphaSlider_->setValue(100);
+    controlLayout->addWidget(bgTitle);
+    controlLayout->addWidget(bgAlphaSlider_);
+
+    panelLayout->addWidget(controlBox);
+
+    auto* opsBox = new QGroupBox("Actions");
+    auto* opsLayout = new QVBoxLayout(opsBox);
+    opsLayout->setSpacing(8);
+
+    opsLayout->addWidget(new QLabel("Export model and textures"));
+    auto* exportDir = new QLineEdit();
+    exportDir->setPlaceholderText("Choose folder...");
+    opsLayout->addWidget(exportDir);
+    auto* exportName = new QLineEdit();
+    exportName->setPlaceholderText("Rename?");
+    opsLayout->addWidget(exportName);
+    auto* exportBtn = new QPushButton("Export");
+    opsLayout->addWidget(exportBtn);
+
+    panelLayout->addWidget(opsBox);
+    panelLayout->addStretch(1);
+
+    splitter->addWidget(panel);
     splitter->setStretchFactor(0, 0);
     splitter->setStretchFactor(1, 1);
-    splitter->setSizes({ 320, 900 });
+    splitter->setStretchFactor(2, 0);
+    splitter->setSizes({ 320, 900, 320 });
 
     root->addWidget(splitter, 1);
-
     // Status bar (QMainWindow)
     statusLabel_ = new QLabel();
     statusLabel_->setTextInteractionFlags(Qt::TextSelectableByMouse);
     statusLabel_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
 
-    speedLabel_ = new QLabel("1.00x");
-    speedLabel_->setMinimumWidth(52);
-    speedLabel_->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
-
-    speedSlider_ = new QSlider(Qt::Horizontal);
-    speedSlider_->setRange(10, 300); // 0.10x .. 3.00x
-    speedSlider_->setValue(100);     // 1.00x default
-    speedSlider_->setFixedWidth(160);
-    speedSlider_->setToolTip("Playback speed");
-
     statusBar()->addWidget(statusLabel_, 1);
     mpqStatusLabel_ = new QLabel("MPQ mounted: 0");
     statusBar()->addPermanentWidget(mpqStatusLabel_);
-    statusBar()->addPermanentWidget(speedLabel_);
-    statusBar()->addPermanentWidget(speedSlider_);
 
     // Log dock
     logDock_ = new QDockWidget("Log", this);
@@ -276,9 +356,13 @@ void MainWindow::buildUi()
 
     connect(speedSlider_, &QSlider::valueChanged, this, [this](int v){
         const float s = float(v) / 100.0f;
-        speedLabel_->setText(QString::asprintf("%.2fx", double(s)));
         if (viewer_)
             viewer_->setPlaybackSpeed(s);
+    });
+    connect(bgAlphaSlider_, &QSlider::valueChanged, this, [this](int v){
+        const float a = float(v) / 100.0f;
+        if (viewer_)
+            viewer_->setBackgroundAlpha(a);
     });
 
     resize(1280, 720);
@@ -287,7 +371,8 @@ void MainWindow::buildUi()
 void MainWindow::chooseFolder()
 {
     const QString folder = QFileDialog::getExistingDirectory(this, "Choose a folder with MDX files", currentFolder_);
-    if (folder.isEmpty()) return;
+    if (folder.isEmpty())
+        return;
     startScanFolder(folder);
 }
 
@@ -300,12 +385,10 @@ void MainWindow::startScanFolder(const QString& folder)
     lblFolder_->setText(folder);
     statusLabel_->setText("Scanning for .mdx files...");
 
-    // Clear UI
     files_.clear();
     listModel_->clear();
     viewer_->setModel(std::nullopt, "No model loaded", QString());
 
-    // Run scan in background
     scanWatcher_.setFuture(QtConcurrent::run(ScanMdxFiles, folder));
 }
 
@@ -326,7 +409,6 @@ void MainWindow::onFolderScanFinished()
     }
     statusLabel_->setText(QString("Found %1 .mdx files. Select one to preview.").arg(files_.size()));
 
-    // Select the first item automatically
     if (!files_.isEmpty())
     {
         const QModelIndex first = proxyModel_->index(0, 0);
@@ -338,11 +420,21 @@ void MainWindow::onFilterTextChanged(const QString& text)
 {
     proxyModel_->setFilterFixedString(text);
 
-    // Auto-select first match after filtering
     if (proxyModel_->rowCount() > 0)
-    {
         list_->setCurrentIndex(proxyModel_->index(0, 0));
-    }
+}
+
+void MainWindow::onSelectionChanged(const QModelIndex& current, const QModelIndex& /*previous*/)
+{
+    if (!current.isValid())
+        return;
+
+    const QModelIndex src = proxyModel_->mapToSource(current);
+    const QString filePath = src.data(Qt::UserRole).toString();
+    if (filePath.isEmpty())
+        return;
+
+    loadSelectedModel(filePath);
 }
 
 void MainWindow::onModelLoadFinished()
@@ -351,11 +443,15 @@ void MainWindow::onModelLoadFinished()
     if (result.token != loadToken_)
         return;
 
+    const QString displayName = QFileInfo(result.path).fileName();
+    if (lblModelName_)
+        lblModelName_->setText(displayName);
+
     if (!result.model)
     {
-        viewer_->setModel(std::nullopt, QFileInfo(result.path).fileName(), result.path);
+        viewer_->setModel(std::nullopt, displayName, result.path);
         statusLabel_->setText(QString("%1 | load failed: %2")
-                                  .arg(QFileInfo(result.path).fileName())
+                                  .arg(displayName)
                                   .arg(result.error));
         LogSink::instance().log(QString("Load failed: %1 | %2").arg(result.path, result.error));
         return;
@@ -364,7 +460,7 @@ void MainWindow::onModelLoadFinished()
     auto shared = std::make_shared<ModelData>(std::move(*result.model));
     modelCache_.insert(result.path, shared);
 
-    viewer_->setModel(std::optional<ModelData>(*shared), QFileInfo(result.path).fileName(), result.path);
+    viewer_->setModel(std::optional<ModelData>(*shared), displayName, result.path);
     LogSink::instance().log(QString("Loaded model: %1 | verts %2 | tris %3")
                                 .arg(result.path)
                                 .arg(shared->vertices.size())
@@ -444,33 +540,26 @@ void MainWindow::exportDiagnostics()
     QMessageBox::information(this, "Export Diagnostics", "Diagnostics package created.");
 }
 
-void MainWindow::onSelectionChanged(const QModelIndex& current, const QModelIndex& /*previous*/)
-{
-    if (!current.isValid()) return;
-
-    // Map to source row, then to full path
-    const QModelIndex src = proxyModel_->mapToSource(current);
-    const QString filePath = src.data(Qt::UserRole).toString();
-    if (filePath.isEmpty()) return;
-
-    loadSelectedModel(filePath);
-}
-
 void MainWindow::loadSelectedModel(const QString& filePath)
 {
+    const QString displayName = QFileInfo(filePath).fileName();
+    if (lblModelName_)
+        lblModelName_->setText(displayName);
+
     if (auto it = modelCache_.find(filePath); it != modelCache_.end())
     {
         if (it.value())
-            viewer_->setModel(std::optional<ModelData>(*it.value()), QFileInfo(filePath).fileName(), filePath);
+            viewer_->setModel(std::optional<ModelData>(*it.value()), displayName, filePath);
         else
-            viewer_->setModel(std::nullopt, QFileInfo(filePath).fileName(), filePath);
+            viewer_->setModel(std::nullopt, displayName, filePath);
         LogSink::instance().log(QString("Loaded model from cache: %1").arg(filePath));
         return;
     }
 
     const int token = ++loadToken_;
-    statusLabel_->setText(QString("%1 | loading...").arg(QFileInfo(filePath).fileName()));
+    statusLabel_->setText(QString("%1 | loading...").arg(displayName));
     LogSink::instance().log(QString("Loading model async: %1").arg(filePath));
 
     modelWatcher_.setFuture(QtConcurrent::run(LoadModelFile, filePath, token));
 }
+

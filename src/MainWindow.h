@@ -66,9 +66,10 @@ private:
     QListView* list_ = nullptr;
     QListView* grid_ = nullptr;
     QLabel* lblFolder_ = nullptr;
+    QLabel* lblModelName_ = nullptr;
     QLabel* statusLabel_ = nullptr;
-    QLabel* speedLabel_ = nullptr;
     QSlider* speedSlider_ = nullptr;
+    QSlider* bgAlphaSlider_ = nullptr;
     QLabel* mpqStatusLabel_ = nullptr;
     GLModelView* viewer_ = nullptr;
     QDockWidget* logDock_ = nullptr;
@@ -85,7 +86,6 @@ private:
     std::shared_ptr<DiskVfs> diskVfs_;
     std::shared_ptr<MpqVfs> mpqVfs_;
 
-    // Background scan
     QFutureWatcher<QStringList> scanWatcher_;
     QFutureWatcher<struct ModelLoadResult> modelWatcher_;
     int loadToken_ = 0;
