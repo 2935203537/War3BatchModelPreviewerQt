@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <limits>
 #include <random>
 
 #include "BlpLoader.h"
@@ -1055,6 +1056,41 @@ void GLModelView::updateSkinning(std::uint32_t globalTimeMs)
     for (std::size_t i = 0; i < nodeCount; ++i)
         buildNode(buildNode, i);
 
+    // Warcraft 3 classic MDX (v800) uses "matrix groups" without explicit per-vertex weights.
+    // Many custom models put multiple bones in a group; averaging them (as a naive "smooth skin")
+    // collapses the mesh into a small blob. The in-game renderer effectively behaves much closer
+    // to rigid skinning per vertex.
+    //
+    // Strategy for preview:
+    //   - If a vertex group contains exactly 1 node -> use it.
+    //   - If it contains multiple nodes -> pick the node whose pivot is closest to the vertex in bind pose.
+    // This fixes the "shrunk/imploded" look for many models while remaining stable for single-node groups.
+
+    auto pickBestNode = [&](const ModelVertex& base, const ModelData::SkinGroup& group) -> int
+    {
+        int best = -1;
+        float bestD2 = std::numeric_limits<float>::max();
+        const QVector3D vpos(base.px, base.py, base.pz);
+
+        for (int candidate : group.nodeIndices)
+        {
+            if (candidate < 0 || std::size_t(candidate) >= nodeWorld.size())
+                continue;
+            // Prefer nearest pivot in bind space.
+            const auto& node = model_->nodes[std::size_t(candidate)];
+            if (node.nodeId < 0)
+                continue;
+            const QVector3D piv(node.pivot.x, node.pivot.y, node.pivot.z);
+            const float d2 = (vpos - piv).lengthSquared();
+            if (d2 < bestD2)
+            {
+                bestD2 = d2;
+                best = candidate;
+            }
+        }
+        return best;
+    };
+
     for (std::size_t i = 0; i < model_->bindVertices.size(); ++i)
     {
         const auto& base = model_->bindVertices[i];
@@ -1076,35 +1112,30 @@ void GLModelView::updateSkinning(std::uint32_t globalTimeMs)
             continue;
         }
 
-        QVector3D posSum(0,0,0);
-        QVector3D nrmSum(0,0,0);
-        int validCount = 0;
-        for (int candidate : group.nodeIndices)
+        int nodeId = -1;
+        if (group.nodeIndices.size() == 1)
         {
-            if (candidate < 0 || std::size_t(candidate) >= nodeWorld.size())
-                continue;
-            const QMatrix4x4& m = nodeWorld[std::size_t(candidate)];
-            const QVector3D p = m.map(QVector3D(base.px, base.py, base.pz));
-            const QMatrix3x3 nrmMat = m.normalMatrix();
-            const QVector3D n = QVector3D(
-                nrmMat(0,0) * base.nx + nrmMat(0,1) * base.ny + nrmMat(0,2) * base.nz,
-                nrmMat(1,0) * base.nx + nrmMat(1,1) * base.ny + nrmMat(1,2) * base.nz,
-                nrmMat(2,0) * base.nx + nrmMat(2,1) * base.ny + nrmMat(2,2) * base.nz
-            );
-            posSum += p;
-            nrmSum += n;
-            ++validCount;
+            nodeId = group.nodeIndices.front();
+        }
+        else
+        {
+            nodeId = pickBestNode(base, group);
         }
 
-        if (validCount == 0)
+        if (nodeId < 0 || std::size_t(nodeId) >= nodeWorld.size())
         {
             skinnedVertices_[i] = base;
             continue;
         }
 
-        const float inv = 1.0f / float(validCount);
-        const QVector3D p = posSum * inv;
-        const QVector3D n = (nrmSum * inv).normalized();
+        const QMatrix4x4& m = nodeWorld[std::size_t(nodeId)];
+        const QVector3D p = m.map(QVector3D(base.px, base.py, base.pz));
+        const QMatrix3x3 nrmMat = m.normalMatrix();
+        const QVector3D n = QVector3D(
+            nrmMat(0,0) * base.nx + nrmMat(0,1) * base.ny + nrmMat(0,2) * base.nz,
+            nrmMat(1,0) * base.nx + nrmMat(1,1) * base.ny + nrmMat(1,2) * base.nz,
+            nrmMat(2,0) * base.nx + nrmMat(2,1) * base.ny + nrmMat(2,2) * base.nz
+        ).normalized();
 
         ModelVertex v = base;
         v.px = p.x();
