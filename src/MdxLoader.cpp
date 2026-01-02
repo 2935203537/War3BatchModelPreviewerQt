@@ -130,21 +130,20 @@ namespace
         return true;
     }
 
-    static quint32 primitiveIndexCount(quint32 d3dPrimitiveType, quint32 primitiveCount)
+    static quint32 indexCountToPrimitiveCount(quint32 d3dPrimitiveType, quint32 indexCount)
     {
-        // Based on D3D-like primitive definitions used by Warcraft III MDX "PTYP"/"PCNT".
+        // MDX PCNT stores index counts per group (see MdxLib).
         switch (d3dPrimitiveType)
         {
-        case 0:  return primitiveCount;           // point list
-        case 1:  return primitiveCount * 2;       // line list
-        case 2:  return primitiveCount + 1;       // line strip (approx)
-        case 3:  return primitiveCount + 1;       // line loop (approx)
-        case 4:  return primitiveCount * 3;       // triangle list
-        case 5:  return primitiveCount + 2;       // triangle strip
-        case 6:  return primitiveCount + 2;       // triangle fan
-        case 7:  return primitiveCount * 4;       // quad list
-        case 8:  return primitiveCount * 2 + 2;   // quad strip
-        default: return 0;
+        case 4: // triangle list
+            return indexCount / 3;
+        case 5: // triangle strip
+        case 6: // triangle fan
+            return (indexCount >= 2) ? (indexCount - 2) : 0;
+        case 7: // quad list
+            return indexCount / 4;
+        default:
+            return 0;
         }
     }
 
@@ -373,8 +372,8 @@ namespace
         }
 
         // Fixed fields
-        quint32 materialId = 0, selectionGroup = 0, selectionFlags = 0;
-        if (!gs.readU32(materialId) || !gs.readU32(selectionGroup) || !gs.readU32(selectionFlags))
+        quint32 materialId = 0, selectionFlags = 0, selectionGroup = 0;
+        if (!gs.readU32(materialId) || !gs.readU32(selectionFlags) || !gs.readU32(selectionGroup))
         {
             setErr(outError, "Unexpected EOF reading geoset header fields.");
             return false;
@@ -463,11 +462,12 @@ namespace
         for (quint32 g = 0; g < groups; ++g)
         {
             const quint32 type = faceTypeGroups[g];
-            const quint32 primCount = faceGroups[g];
-            const quint32 idxCount = primitiveIndexCount(type, primCount);
-            if (idxCount == 0) { cursor += idxCount; continue; }
+            const quint32 idxCount = faceGroups[g];
+            const quint32 primCount = indexCountToPrimitiveCount(type, idxCount);
+            if (idxCount == 0) { continue; }
             if (cursor + idxCount > faces.size()) break;
-            appendTrianglesFromPrimitive(type, primCount, faces, cursor, /*baseVertex*/ 0, out.triIndices);
+            if (primCount > 0)
+                appendTrianglesFromPrimitive(type, primCount, faces, cursor, /*baseVertex*/ 0, out.triIndices);
             cursor += idxCount;
         }
 
@@ -569,7 +569,7 @@ namespace
                 const qsizetype layerStart = mr.pos;
                 quint32 layerSize = 0;
                 if (!mr.readU32(layerSize)) { setErr(outError, "Unexpected EOF reading layer size."); return false; }
-                if (layerSize < 28 || layerStart + qsizetype(layerSize) > mr.size)
+                if (layerSize < 24 || layerStart + qsizetype(layerSize) > mr.size)
                 {
                     setErr(outError, "Invalid layer size.");
                     return false;
@@ -586,16 +586,22 @@ namespace
                 layer.shadingFlags = shadingFlags;
                 layer.filterMode = filterMode;
 
-                if (mdxVersion > 800)
+                const qsizetype layerEnd = layerStart + qsizetype(layerSize);
+                if (mdxVersion > 800 && (layerEnd - mr.pos) >= 20)
                 {
-                    // layerShaderId
-                    if (!mr.skip(4)) { setErr(outError, "Unexpected EOF skipping layerShaderId."); return false; }
+                    // Optional layerShaderId in reforged-era files.
+                    quint32 layerShaderId = 0;
+                    if (!mr.readU32(layerShaderId))
+                    {
+                        setErr(outError, "Unexpected EOF reading layerShaderId.");
+                        return false;
+                    }
                 }
 
                 quint32 textureId = 0, textureAnimId = 0, coordId = 0;
-                float alpha = 1.0f, emissiveGain = 0.0f;
+                float alpha = 1.0f;
                 if (!mr.readU32(textureId) || !mr.readU32(textureAnimId) || !mr.readU32(coordId) ||
-                    !mr.readF32(alpha) || !mr.readF32(emissiveGain))
+                    !mr.readF32(alpha))
                 {
                     setErr(outError, "Unexpected EOF reading layer fields.");
                     return false;
@@ -604,8 +610,15 @@ namespace
                 layer.coordId = coordId;
                 layer.alpha = alpha;
 
+                // Optional emissive gain if present, then skip remaining tracks.
+                if ((layerEnd - mr.pos) >= 4)
+                {
+                    float emissiveGain = 0.0f;
+                    mr.readF32(emissiveGain);
+                }
+
                 // Skip remaining unknown tracks to end of layer
-                mr.pos = layerStart + qsizetype(layerSize);
+                mr.pos = layerEnd;
 
                 if (li == 0)
                     m.layer = layer;
@@ -614,6 +627,233 @@ namespace
             out.materials.push_back(m);
         }
 
+        return true;
+    }
+
+    static bool parseSequences(Reader& r, quint32 chunkSize, ModelData& out, QString* outError)
+    {
+        Q_UNUSED(outError);
+        // SEQS is an array of fixed-size records.
+        // Each sequence is 132 bytes in MDX 800 (most common):
+        // char name[80]; int32 start; int32 end; float moveSpeed; uint32 flags;
+        // int32 rarity; int32 syncPoint; float extents[6] (min/max) => 24 bytes.
+        // Total: 80 + 4 + 4 + 4 + 4 + 4 + 4 + 24 = 128? Some docs list 132; in practice extra 4 bytes padding.
+        // We parse conservatively based on remaining bytes.
+
+        const qsizetype recordMin = 80 + 4 + 4 + 4 + 4; // name + start/end + moveSpeed + flags
+        if (chunkSize < recordMin)
+            return true;
+
+        while (r.canRead(recordMin))
+        {
+            ModelData::Sequence s;
+            s.name = readFixedString(r, 80);
+            qint32 st = 0, en = 0;
+            float move = 0.0f;
+            quint32 flags = 0;
+            if (!r.readI32(st) || !r.readI32(en) || !r.readF32(move) || !r.readU32(flags))
+                break;
+            s.startMs = (st < 0) ? 0u : std::uint32_t(st);
+            s.endMs = (en < 0) ? 0u : std::uint32_t(en);
+            s.moveSpeed = move;
+            s.flags = flags;
+
+            // Skip the rest of the record if present.
+            // Try to skip rarity + syncPoint + extents + optional padding.
+            // Many files use 132-byte records.
+            const qsizetype consumed = recordMin;
+            // We already consumed recordMin; now attempt to skip up to 132-recordMin, but only if available.
+            const qsizetype targetRecordSize = 132;
+            const qsizetype remainForThis = std::min<qsizetype>(targetRecordSize - consumed, r.size - r.pos);
+            if (remainForThis > 0 && r.canRead(remainForThis))
+                r.skip(remainForThis);
+
+            out.sequences.push_back(std::move(s));
+        }
+        return true;
+    }
+
+    static bool parseGlobalSequences(Reader& r, quint32 chunkSize, ModelData& out, QString* outError)
+    {
+        Q_UNUSED(outError);
+        const qsizetype n = chunkSize / 4;
+        out.globalSequencesMs.reserve(out.globalSequencesMs.size() + size_t(n));
+        for (qsizetype i = 0; i < n; ++i)
+        {
+            quint32 v = 0;
+            if (!r.readU32(v)) break;
+            out.globalSequencesMs.push_back(v);
+        }
+        return true;
+    }
+
+    static bool parsePivots(Reader& r, quint32 chunkSize, ModelData& out, QString* outError)
+    {
+        Q_UNUSED(outError);
+        const qsizetype n = chunkSize / (qsizetype(3) * 4);
+        out.pivots.reserve(out.pivots.size() + size_t(n));
+        for (qsizetype i = 0; i < n; ++i)
+        {
+            ModelData::Pivot p;
+            if (!r.readF32(p.x) || !r.readF32(p.y) || !r.readF32(p.z)) break;
+            out.pivots.push_back(p);
+        }
+        return true;
+    }
+
+    static bool parseFloatTrack(Reader& r, quint32 chunkSize, ModelData::MdxTrack<float>& outTrack)
+    {
+        // Header: int32 numTracks, int32 interpolationType, int32 globalSeqId
+        qint32 num = 0, interp = 0, globalSeq = -1;
+        if (!r.readI32(num) || !r.readI32(interp) || !r.readI32(globalSeq))
+            return false;
+        if (num < 0) num = 0;
+
+        outTrack.globalSeqId = globalSeq;
+        outTrack.keys.clear();
+        outTrack.keys.reserve(size_t(num));
+
+        // Map interpolation type
+        switch (interp)
+        {
+        case 0: outTrack.interp = ModelData::MdxInterp::None; break;
+        case 1: outTrack.interp = ModelData::MdxInterp::Linear; break;
+        case 2: outTrack.interp = ModelData::MdxInterp::Hermite; break;
+        case 3: outTrack.interp = ModelData::MdxInterp::Bezier; break;
+        default: outTrack.interp = ModelData::MdxInterp::None; break;
+        }
+
+        for (qint32 i = 0; i < num; ++i)
+        {
+            qint32 t = 0;
+            float v = 0.0f;
+            if (!r.readI32(t) || !r.readF32(v))
+                return false;
+            ModelData::MdxTrackKey<float> k;
+            k.timeMs = (t < 0) ? 0u : std::uint32_t(t);
+            k.value = v;
+            if (interp >= 2)
+            {
+                float inT = 0.0f, outT = 0.0f;
+                if (!r.readF32(inT) || !r.readF32(outT))
+                    return false;
+                k.inTan = inT;
+                k.outTan = outT;
+            }
+            outTrack.keys.push_back(k);
+        }
+
+        Q_UNUSED(chunkSize);
+        return true;
+    }
+
+    static bool parsePRE2(Reader& r, quint32 chunkSize, ModelData& model, QString* outError)
+    {
+        Q_UNUSED(outError);
+        const qsizetype startPos = r.pos;
+        const qsizetype endPos = startPos + qsizetype(chunkSize);
+        while (r.pos + 4 <= endPos)
+        {
+            quint32 objectSize = 0;
+            if (!r.readU32(objectSize)) break;
+            if (objectSize < 8) break;
+            const qsizetype objStart = r.pos - 4;
+            const qsizetype objEnd = objStart + qsizetype(objectSize);
+            if (objEnd > endPos) break;
+
+            // Sub-reader scoped to this object
+            Reader orr;
+            orr.data = r.data + objStart;
+            orr.size = qsizetype(objectSize);
+            orr.pos = 4; // we already consumed objectSize
+
+            quint32 genericSize = 0;
+            if (!orr.readU32(genericSize)) { r.pos = objEnd; continue; }
+
+            ModelData::ParticleEmitter2 e;
+            e.name = readFixedString(orr, 80);
+            qint32 oid = -1, pid = -1;
+            quint32 flags = 0;
+            if (!orr.readI32(oid) || !orr.readI32(pid) || !orr.readU32(flags)) { r.pos = objEnd; continue; }
+            e.objectId = oid;
+            e.parentId = pid;
+            e.flags = flags;
+
+            // Generic object may include additional bytes (animations) up to genericSize.
+            // Base consumed after genericSize field: 80+4+4+4 = 92
+            const qint64 genericConsumed = 92;
+            const qint64 genericRemain = qint64(genericSize) - genericConsumed;
+            if (genericRemain > 0)
+                orr.skip(qsizetype(std::min<qint64>(genericRemain, (qint64)orr.size - (qint64)orr.pos)));
+
+            // Emitter2 fields
+            if (!orr.readF32(e.speed) || !orr.readF32(e.variation) || !orr.readF32(e.latitude) ||
+                !orr.readF32(e.gravity) || !orr.readF32(e.lifespan) || !orr.readF32(e.emissionRate) ||
+                !orr.readF32(e.length) || !orr.readF32(e.width) || !orr.readU32(e.filterMode) ||
+                !orr.readU32(e.rows) || !orr.readU32(e.columns) || !orr.readU32(e.headOrTail) ||
+                !orr.readF32(e.tailLength) || !orr.readF32(e.timeMiddle))
+            {
+                r.pos = objEnd;
+                continue;
+            }
+
+            for (int si = 0; si < 3; ++si)
+            {
+                if (!orr.readF32(e.segmentColor[si].x) || !orr.readF32(e.segmentColor[si].y) || !orr.readF32(e.segmentColor[si].z))
+                { r.pos = objEnd; continue; }
+            }
+            if (!orr.readBytes(e.segmentAlpha, 3)) { r.pos = objEnd; continue; }
+            for (int si = 0; si < 3; ++si)
+                if (!orr.readF32(e.segmentScaling[si])) { r.pos = objEnd; continue; }
+
+            for (int a = 0; a < 2; ++a)
+                for (int b = 0; b < 3; ++b)
+                    if (!orr.readU32(e.headIntervals[a][b])) { r.pos = objEnd; continue; }
+            for (int a = 0; a < 2; ++a)
+                for (int b = 0; b < 3; ++b)
+                    if (!orr.readU32(e.tailIntervals[a][b])) { r.pos = objEnd; continue; }
+
+            qint32 texId = -1;
+            if (!orr.readI32(texId) || !orr.readU32(e.squirt) || !orr.readI32(e.priorityPlane) || !orr.readU32(e.replaceableId))
+            {
+                r.pos = objEnd;
+                continue;
+            }
+            e.textureId = texId;
+
+            // Parse remaining sub-chunks inside this object (animation tracks)
+            while (orr.pos + 8 <= orr.size)
+            {
+                char t[4] = {};
+                quint32 sz = 0;
+                if (!orr.peekTag(t)) break;
+                if (!std::isalpha((unsigned char)t[0])) break;
+                if (!orr.readTag(t) || !orr.readU32(sz)) break;
+                if (!orr.canRead(qsizetype(sz))) break;
+
+                Reader tr;
+                tr.data = orr.data + orr.pos;
+                tr.size = qsizetype(sz);
+                tr.pos = 0;
+
+                if (tagEq(t, "KP2S")) parseFloatTrack(tr, sz, e.trackSpeed);
+                else if (tagEq(t, "KP2R")) parseFloatTrack(tr, sz, e.trackVariation);
+                else if (tagEq(t, "KP2L")) parseFloatTrack(tr, sz, e.trackLatitude);
+                else if (tagEq(t, "KP2G")) parseFloatTrack(tr, sz, e.trackGravity);
+                else if (tagEq(t, "KP2E")) parseFloatTrack(tr, sz, e.trackEmissionRate);
+                else if (tagEq(t, "KP2V")) parseFloatTrack(tr, sz, e.trackVisibility);
+
+                orr.pos += qsizetype(sz);
+            }
+
+            model.emitters2.push_back(std::move(e));
+
+            // Advance outer reader to end of object
+            r.pos = objEnd;
+        }
+
+        // ensure r.pos at end of chunk
+        r.pos = startPos + qsizetype(chunkSize);
         return true;
     }
 }
@@ -722,41 +962,93 @@ namespace MdxLoader
                     model.subMeshes.push_back(sm);
                 }
             }
+            else if (tagEq(tag, "SEQS"))
+            {
+                if (!parseSequences(cr, chunkSize, model, outError))
+                    return std::nullopt;
+            }
+            else if (tagEq(tag, "GLBS"))
+            {
+                if (!parseGlobalSequences(cr, chunkSize, model, outError))
+                    return std::nullopt;
+            }
+            else if (tagEq(tag, "PIVT"))
+            {
+                if (!parsePivots(cr, chunkSize, model, outError))
+                    return std::nullopt;
+            }
+            else if (tagEq(tag, "PRE2"))
+            {
+                if (!parsePRE2(cr, chunkSize, model, outError))
+                    return std::nullopt;
+            }
 
             // advance outer reader
             r.pos = chunkStart + qsizetype(chunkSize);
         }
 
-        if (model.vertices.empty() || model.indices.empty())
+        const bool hasMesh = !model.vertices.empty() && !model.indices.empty();
+        const bool hasParticles = !model.emitters2.empty();
+        if (!hasMesh && !hasParticles)
         {
-            setErr(outError, "No geometry found (GEOS missing or empty).");
+            setErr(outError, "No renderable data found (missing GEOS and PRE2). ");
             return std::nullopt;
         }
 
-        // Compute bounds
-        float minv[3] = { std::numeric_limits<float>::infinity(),
-                          std::numeric_limits<float>::infinity(),
-                          std::numeric_limits<float>::infinity() };
-        float maxv[3] = { -std::numeric_limits<float>::infinity(),
-                          -std::numeric_limits<float>::infinity(),
-                          -std::numeric_limits<float>::infinity() };
-
-        for (const auto& v : model.vertices)
+        // Compute bounds (mesh preferred; otherwise use pivots; otherwise a small default cube)
         {
-            minv[0] = std::min(minv[0], v.px);
-            minv[1] = std::min(minv[1], v.py);
-            minv[2] = std::min(minv[2], v.pz);
-            maxv[0] = std::max(maxv[0], v.px);
-            maxv[1] = std::max(maxv[1], v.py);
-            maxv[2] = std::max(maxv[2], v.pz);
+            float minv[3] = { std::numeric_limits<float>::infinity(),
+                              std::numeric_limits<float>::infinity(),
+                              std::numeric_limits<float>::infinity() };
+            float maxv[3] = { -std::numeric_limits<float>::infinity(),
+                              -std::numeric_limits<float>::infinity(),
+                              -std::numeric_limits<float>::infinity() };
+
+            if (hasMesh)
+            {
+                for (const auto& v : model.vertices)
+                {
+                    minv[0] = std::min(minv[0], v.px);
+                    minv[1] = std::min(minv[1], v.py);
+                    minv[2] = std::min(minv[2], v.pz);
+                    maxv[0] = std::max(maxv[0], v.px);
+                    maxv[1] = std::max(maxv[1], v.py);
+                    maxv[2] = std::max(maxv[2], v.pz);
+                }
+            }
+            else if (!model.pivots.empty())
+            {
+                for (const auto& p : model.pivots)
+                {
+                    minv[0] = std::min(minv[0], p.x);
+                    minv[1] = std::min(minv[1], p.y);
+                    minv[2] = std::min(minv[2], p.z);
+                    maxv[0] = std::max(maxv[0], p.x);
+                    maxv[1] = std::max(maxv[1], p.y);
+                    maxv[2] = std::max(maxv[2], p.z);
+                }
+            }
+            else
+            {
+                minv[0] = minv[1] = minv[2] = -1.0f;
+                maxv[0] = maxv[1] = maxv[2] = 1.0f;
+            }
+
+            // Expand bounds slightly for particle-only models
+            if (!hasMesh && hasParticles)
+            {
+                minv[0] -= 64.0f; minv[1] -= 64.0f; minv[2] -= 64.0f;
+                maxv[0] += 64.0f; maxv[1] += 64.0f; maxv[2] += 64.0f;
+            }
+
+            model.boundsMin[0] = minv[0];
+            model.boundsMin[1] = minv[1];
+            model.boundsMin[2] = minv[2];
+            model.boundsMax[0] = maxv[0];
+            model.boundsMax[1] = maxv[1];
+            model.boundsMax[2] = maxv[2];
+            model.hasBounds = true;
         }
-        model.boundsMin[0] = minv[0];
-        model.boundsMin[1] = minv[1];
-        model.boundsMin[2] = minv[2];
-        model.boundsMax[0] = maxv[0];
-        model.boundsMax[1] = maxv[1];
-        model.boundsMax[2] = maxv[2];
-        model.hasBounds = true;
 
         // If MTLS chunk is missing, ensure at least 1 default material.
         if (model.materials.empty())

@@ -5,6 +5,9 @@
 #include <QOpenGLShaderProgram>
 #include <QVector3D>
 #include <QMatrix4x4>
+#include <QRandomGenerator>
+#include <QTimer>
+#include <QElapsedTimer>
 #include <optional>
 #include <unordered_map>
 
@@ -19,6 +22,10 @@ public:
 
     void setModel(std::optional<ModelData> model, const QString& displayName);
     void setAssetRoot(const QString& assetRoot);
+
+    // Animation / playback
+    // Default = 1.0; clamped to [0.05, 10.0]
+    void setPlaybackSpeed(float speed);
 
 signals:
     void statusTextChanged(const QString& text);
@@ -81,4 +88,45 @@ private:
 
     // Cached matrices
     QMatrix4x4 proj_;
+
+    // ---- Animation state ----
+    float playbackSpeed_ = 1.0f;
+    std::uint32_t localTimeMs_ = 0;
+    int currentSeq_ = 0; // auto-play sequences[0]
+
+    QTimer frameTick_;
+    QElapsedTimer frameTimer_;
+
+    void tickAnimation();
+    void updateEmitters(float dtSeconds);
+
+    // ---- Particle runtime ----
+    struct Particle
+    {
+        QVector3D pos;
+        QVector3D vel;
+        float age = 0.0f;
+        float life = 1.0f;
+    };
+
+    struct RuntimeEmitter2
+    {
+        double spawnAccum = 0.0;
+        std::vector<Particle> particles;
+    };
+
+    std::vector<RuntimeEmitter2> runtimeEmitters2_;
+
+    struct ParticleVertex
+    {
+        float px, py, pz;
+        float u, v;
+        float r, g, b, a;
+    };
+    std::vector<ParticleVertex> particleVerts_;
+
+    QOpenGLShaderProgram particleProgram_;
+    bool particleProgramReady_ = false;
+    GLuint pVao_ = 0;
+    GLuint pVbo_ = 0;
 };

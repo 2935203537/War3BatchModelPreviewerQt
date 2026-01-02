@@ -45,6 +45,9 @@ struct SubMesh
     std::uint32_t materialId = 0; // index into ModelData::materials
 };
 
+// Small helper vector type used by the particle system.
+struct Vec3 { float x=0, y=0, z=0; };
+
 struct ModelData
 {
     std::vector<ModelVertex> vertices;
@@ -59,4 +62,95 @@ struct ModelData
     bool hasBounds = false;
 
     std::uint32_t mdxVersion = 800; // from VERS
+
+    // ---- Animation (SEQS/GLBS) ----
+    struct Sequence
+    {
+        std::string name;
+        std::uint32_t startMs = 0;
+        std::uint32_t endMs = 0;
+        std::uint32_t flags = 0;
+        float moveSpeed = 0.0f;
+    };
+
+    std::vector<Sequence> sequences;
+    std::vector<std::uint32_t> globalSequencesMs; // GLBS durations (ms)
+
+    // ---- Pivots (PIVT) ----
+    struct Pivot
+    {
+        float x = 0, y = 0, z = 0;
+    };
+    std::vector<Pivot> pivots;
+
+
+    // ---- MDX animation track ----
+    enum class MdxInterp : std::int32_t
+    {
+        None = 0,
+        Linear = 1,
+        Hermite = 2,
+        Bezier = 3,
+    };
+
+    template<typename T>
+    struct MdxTrackKey
+    {
+        std::uint32_t timeMs = 0;
+        T value{};
+        T inTan{};
+        T outTan{};
+    };
+
+    template<typename T>
+    struct MdxTrack
+    {
+        MdxInterp interp = MdxInterp::None;
+        std::int32_t globalSeqId = -1;
+        std::vector<MdxTrackKey<T>> keys;
+        bool empty() const { return keys.empty(); }
+    };
+
+    struct ParticleEmitter2
+    {
+        std::string name;
+        std::int32_t objectId = -1;  // often indexes pivot
+        std::int32_t parentId = -1;
+        std::uint32_t flags = 0;
+
+        float speed = 0.0f;
+        float variation = 0.0f;
+        float latitude = 0.0f;
+        float gravity = 0.0f;
+        float lifespan = 0.0f;
+        float emissionRate = 0.0f;
+        float width = 0.0f;
+        float length = 0.0f;
+        std::uint32_t filterMode = 0;
+        std::uint32_t rows = 1;
+        std::uint32_t columns = 1;
+        std::uint32_t headOrTail = 0; // 0=head, 1=tail
+        float tailLength = 0.0f;
+        float timeMiddle = 0.5f;
+        Vec3 segmentColor[3] = { {1,1,1},{1,1,1},{1,1,1} };
+        std::uint8_t segmentAlpha[3] = {255,255,255};
+        float segmentScaling[3] = {100,100,100}; // percent
+        std::uint32_t headIntervals[2][3] = {};
+        std::uint32_t tailIntervals[2][3] = {};
+        std::int32_t textureId = -1;
+        std::uint32_t squirt = 0;
+        std::int32_t priorityPlane = 0;
+        std::uint32_t replaceableId = 0;
+
+        // Tracks (KP2*)
+        MdxTrack<float> trackSpeed;        // KP2S
+        MdxTrack<float> trackEmissionRate; // KP2E
+        MdxTrack<float> trackGravity;      // KP2G
+        MdxTrack<float> trackLifespan;     // KP2L
+        MdxTrack<float> trackVisibility;   // KP2N
+        MdxTrack<float> trackVariation;    // KP2V (rare)
+        MdxTrack<float> trackLatitude;     // KP2A (rare)
+    };
+
+    std::vector<ParticleEmitter2> emitters2;
 };

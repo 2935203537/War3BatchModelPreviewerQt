@@ -12,6 +12,7 @@ class QListView;
 class QLineEdit;
 class QLabel;
 class QPushButton;
+class QSlider;
 class GLModelView;
 
 class MainWindow final : public QMainWindow
@@ -41,7 +42,9 @@ private:
     QLineEdit* editFilter_ = nullptr;
     QListView* list_ = nullptr;
     QLabel* lblFolder_ = nullptr;
-    QLabel* lblStatus_ = nullptr;
+    QLabel* statusLabel_ = nullptr;
+    QLabel* speedLabel_ = nullptr;
+    QSlider* speedSlider_ = nullptr;
     GLModelView* viewer_ = nullptr;
 
     // Models

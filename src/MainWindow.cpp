@@ -14,6 +14,8 @@
 #include <QPushButton>
 #include <QMessageBox>
 #include <QItemSelectionModel>
+#include <QStatusBar>
+#include <QSlider>
 #include <QtConcurrent/QtConcurrent>
 
 #include "GLModelView.h"
@@ -49,7 +51,7 @@ MainWindow::MainWindow(QWidget* parent)
             this, &MainWindow::onFolderScanFinished);
 
     // Default: prompt user to pick a folder.
-    lblStatus_->setText("Choose a folder containing .mdx files.");
+    statusLabel_->setText("Choose a folder containing .mdx files.");
 }
 
 MainWindow::~MainWindow()
@@ -107,10 +109,24 @@ void MainWindow::buildUi()
 
     root->addWidget(splitter, 1);
 
-    // Status bar (simple label)
-    lblStatus_ = new QLabel();
-    lblStatus_->setTextInteractionFlags(Qt::TextSelectableByMouse);
-    root->addWidget(lblStatus_);
+    // Status bar (QMainWindow)
+    statusLabel_ = new QLabel();
+    statusLabel_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    statusLabel_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+
+    speedLabel_ = new QLabel("1.00x");
+    speedLabel_->setMinimumWidth(52);
+    speedLabel_->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+
+    speedSlider_ = new QSlider(Qt::Horizontal);
+    speedSlider_->setRange(10, 300); // 0.10x .. 3.00x
+    speedSlider_->setValue(100);     // 1.00x default
+    speedSlider_->setFixedWidth(160);
+    speedSlider_->setToolTip("Playback speed");
+
+    statusBar()->addWidget(statusLabel_, 1);
+    statusBar()->addPermanentWidget(speedLabel_);
+    statusBar()->addPermanentWidget(speedSlider_);
 
     // Models
     listModel_ = new QStringListModel(this);
@@ -130,7 +146,14 @@ void MainWindow::buildUi()
             this, &MainWindow::onSelectionChanged);
 
     connect(viewer_, &GLModelView::statusTextChanged, this, [this](const QString& t){
-        lblStatus_->setText(t);
+        statusLabel_->setText(t);
+    });
+
+    connect(speedSlider_, &QSlider::valueChanged, this, [this](int v){
+        const float s = float(v) / 100.0f;
+        speedLabel_->setText(QString::asprintf("%.2fx", double(s)));
+        if (viewer_)
+            viewer_->setPlaybackSpeed(s);
     });
 
     resize(1280, 720);
@@ -148,7 +171,7 @@ void MainWindow::startScanFolder(const QString& folder)
     currentFolder_ = folder;
     viewer_->setAssetRoot(currentFolder_);
     lblFolder_->setText(folder);
-    lblStatus_->setText("Scanning for .mdx files...");
+    statusLabel_->setText("Scanning for .mdx files...");
 
     // Clear UI
     files_.clear();
@@ -169,7 +192,7 @@ void MainWindow::onFolderScanFinished()
         display << DisplayNameFromPath(currentFolder_, p);
 
     listModel_->setStringList(display);
-    lblStatus_->setText(QString("Found %1 .mdx files. Select one to preview.").arg(files_.size()));
+    statusLabel_->setText(QString("Found %1 .mdx files. Select one to preview.").arg(files_.size()));
 
     // Select the first item automatically
     if (!files_.isEmpty())
@@ -209,7 +232,7 @@ void MainWindow::loadSelectedModel(const QString& filePath)
     if (!model)
     {
         viewer_->setModel(std::nullopt, QFileInfo(filePath).fileName());
-        lblStatus_->setText(QString("%1 | load failed: %2").arg(QFileInfo(filePath).fileName()).arg(err));
+        statusLabel_->setText(QString("%1 | load failed: %2").arg(QFileInfo(filePath).fileName()).arg(err));
         return;
     }
 
