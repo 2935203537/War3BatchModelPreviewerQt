@@ -8,6 +8,7 @@
 
 #include "MainWindow.h"
 #include "MdxLoader.h"
+#include "LogSink.h"
 
 static void ConfigureOpenGL()
 {
@@ -29,6 +30,9 @@ int main(int argc, char *argv[])
     QApplication app(argc, argv);
     QApplication::setApplicationName("War3 Batch Model Previewer");
     QApplication::setOrganizationName("Local");
+
+    QDir(QDir::current()).mkpath("logs");
+    LogSink::instance().init(QDir(QDir::current()).filePath("logs/latest.log"));
 
     if (qEnvironmentVariableIsSet("MDX_DEBUG_LOAD"))
     {

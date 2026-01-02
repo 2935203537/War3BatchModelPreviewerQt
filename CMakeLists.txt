@@ -37,6 +37,8 @@ set(SOURCES
     src/ModelData.h
     src/BlpLoader.cpp
     src/BlpLoader.h
+    src/LogSink.cpp
+    src/LogSink.h
 )
 
 if (USE_QT5)

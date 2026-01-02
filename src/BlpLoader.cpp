@@ -2,6 +2,9 @@
 
 #include <QFile>
 #include <QByteArray>
+#include <QHash>
+#include <QMutex>
+#include <QMutexLocker>
 #include <QtGlobal>
 
 namespace
@@ -335,5 +338,42 @@ namespace BlpLoader
             *outImage = img;
             return true;
         }
+    }
+
+    bool LoadBlpToImageCached(const QString& filePath, QImage* outImage, QString* outError)
+    {
+        if (!outImage)
+        {
+            setErr(outError, "Output image is null.");
+            return false;
+        }
+
+        static QHash<QString, QImage> cache;
+        static QMutex cacheMutex;
+
+        {
+            QMutexLocker lock(&cacheMutex);
+            auto it = cache.constFind(filePath);
+            if (it != cache.constEnd())
+            {
+                *outImage = it.value();
+                return !outImage->isNull();
+            }
+        }
+
+        QImage img;
+        QString err;
+        if (!LoadBlpToImage(filePath, &img, &err))
+        {
+            setErr(outError, err);
+            return false;
+        }
+
+        {
+            QMutexLocker lock(&cacheMutex);
+            cache.insert(filePath, img);
+        }
+        *outImage = img;
+        return true;
     }
 }

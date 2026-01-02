@@ -12,4 +12,5 @@
 namespace BlpLoader
 {
     bool LoadBlpToImage(const QString& filePath, QImage* outImage, QString* outError = nullptr);
+    bool LoadBlpToImageCached(const QString& filePath, QImage* outImage, QString* outError = nullptr);
 }

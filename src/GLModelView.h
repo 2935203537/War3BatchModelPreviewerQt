@@ -2,12 +2,14 @@
 
 #include <QOpenGLWidget>
 #include <QOpenGLFunctions_3_3_Core>
+#include <QOpenGLDebugLogger>
 #include <QOpenGLShaderProgram>
 #include <QVector3D>
 #include <QMatrix4x4>
 #include <QRandomGenerator>
 #include <QTimer>
 #include <QElapsedTimer>
+#include <QHash>
 #include <optional>
 #include <unordered_map>
 
@@ -20,8 +22,9 @@ public:
     explicit GLModelView(QWidget* parent = nullptr);
     ~GLModelView() override;
 
-    void setModel(std::optional<ModelData> model, const QString& displayName);
+    void setModel(std::optional<ModelData> model, const QString& displayName, const QString& filePath);
     void setAssetRoot(const QString& assetRoot);
+    void resetView();
 
     // Animation / playback
     // Default = 1.0; clamped to [0.05, 10.0]
@@ -44,7 +47,12 @@ private:
     void clearGpuResources();
 
     GLuint getOrCreateTexture(std::uint32_t textureId);
-    QString resolveTexturePath(const std::string& mdxPath) const;
+    struct TextureResolve
+    {
+        QString path;
+        QString source;
+    };
+    TextureResolve resolveTexturePath(const std::string& mdxPath) const;
     GLuint createPlaceholderTexture();
 
     struct GpuSubmesh
@@ -54,14 +62,26 @@ private:
         std::uint32_t materialId = 0;
     };
 
+    struct GpuCacheEntry
+    {
+        GLuint vao = 0;
+        GLuint vbo = 0;
+        GLuint ibo = 0;
+        std::vector<GpuSubmesh> submeshes;
+    };
+
     struct TextureHandle
     {
         GLuint id = 0;
         bool valid = false;
+        QString path;
+        QString source;
     };
 
     std::optional<ModelData> model_;
     QString displayName_;
+    QString modelPath_;
+    QString modelDir_;
     QString assetRoot_;
 
     // GPU resources
@@ -69,12 +89,17 @@ private:
     GLuint vbo_ = 0;
     GLuint ibo_ = 0;
     std::vector<GpuSubmesh> gpuSubmeshes_;
+    QHash<QString, GpuCacheEntry> gpuCache_;
 
     QOpenGLShaderProgram program_;
     bool programReady_ = false;
+    QOpenGLDebugLogger glLogger_;
+    bool glLoggerReady_ = false;
 
     std::unordered_map<std::uint32_t, TextureHandle> textureCache_;
     GLuint placeholderTex_ = 0;
+    GLuint teamColorTex_ = 0;
+    GLuint teamGlowTex_ = 0;
 
     // Camera controls
     QPoint lastMouse_;

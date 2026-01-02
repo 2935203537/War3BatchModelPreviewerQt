@@ -5,3 +5,5 @@
 *.vcxproj*
 *.sln
 /resource/
+/CMakeUserPresets.json
+/logs/

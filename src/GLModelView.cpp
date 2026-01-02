@@ -15,6 +15,7 @@
 #include <random>
 
 #include "BlpLoader.h"
+#include "LogSink.h"
 
 namespace
 {
@@ -140,9 +141,19 @@ void GLModelView::setAssetRoot(const QString& assetRoot)
     assetRoot_ = assetRoot;
 }
 
-void GLModelView::setModel(std::optional<ModelData> model, const QString& displayName)
+void GLModelView::resetView()
+{
+    yaw_ = 30.0f;
+    pitch_ = -25.0f;
+    distance_ = clampf(modelRadius_ * 2.5f, 1.0f, 250.0f);
+    update();
+}
+
+void GLModelView::setModel(std::optional<ModelData> model, const QString& displayName, const QString& filePath)
 {
     displayName_ = displayName;
+    modelPath_ = filePath;
+    modelDir_ = filePath.isEmpty() ? QString() : QFileInfo(filePath).absolutePath();
     model_ = std::move(model);
 
     localTimeMs_ = 0;
@@ -184,14 +195,14 @@ void GLModelView::setModel(std::optional<ModelData> model, const QString& displa
             (m.boundsMax[2] - m.boundsMin[2]) * 0.5f
         );
         modelRadius_ = std::max(0.25f, ext.length());
-        distance_ = clampf(modelRadius_ * 2.5f, 1.0f, 250.0f);
     }
     else
     {
         modelCenter_ = QVector3D(0, 0, 0);
         modelRadius_ = 1.0f;
-        distance_ = 6.0f;
     }
+
+    resetView();
 
     QString seqInfo = "<no SEQS>";
     if (model_ && !model_->sequences.empty())
@@ -225,6 +236,22 @@ void GLModelView::initializeGL()
 {
     initializeOpenGLFunctions();
     glEnable(GL_DEPTH_TEST);
+
+    if (glLogger_.initialize())
+    {
+        glLoggerReady_ = true;
+        connect(&glLogger_, &QOpenGLDebugLogger::messageLogged, this,
+                [](const QOpenGLDebugMessage& msg){
+                    const QString line = QString("GL: [%1] %2 (id=%3)")
+                                             .arg(msg.severity())
+                                             .arg(msg.message())
+                                             .arg(msg.id());
+                    LogSink::instance().log(line);
+                });
+        glLogger_.startLogging(QOpenGLDebugLogger::SynchronousLogging);
+        glLogger_.enableMessages();
+        LogSink::instance().log("GL debug logger initialized.");
+    }
 
     // Many War3 assets have inconsistent winding. For a preview tool, disable culling
     // so models show up reliably.
@@ -295,7 +322,10 @@ void GLModelView::initializeGL()
 
     programReady_ = program_.link();
     if (!programReady_)
+    {
         emit statusTextChanged("Mesh shader link failed: " + program_.log());
+        LogSink::instance().log("Mesh shader link failed: " + program_.log());
+    }
 
     // Particle shader (unlit)
     particleProgram_.addShaderFromSourceCode(QOpenGLShader::Vertex, QString(R"GLSL(
@@ -338,7 +368,10 @@ void GLModelView::initializeGL()
 
     particleProgramReady_ = particleProgram_.link();
     if (!particleProgramReady_)
+    {
         emit statusTextChanged("Particle shader link failed: " + particleProgram_.log());
+        LogSink::instance().log("Particle shader link failed: " + particleProgram_.log());
+    }
 
     // Particle buffer
     glGenVertexArrays(1, &pVao_);
@@ -622,6 +655,12 @@ void GLModelView::paintGL()
 
         glBindVertexArray(0);
         program_.release();
+
+        // Reset to a known baseline before other passes.
+        glDisable(GL_BLEND);
+        glEnable(GL_DEPTH_TEST);
+        glDepthMask(GL_TRUE);
+        glDisable(GL_CULL_FACE);
     }
 
     // --- Draw particles (PRE2)
@@ -826,6 +865,8 @@ void GLModelView::paintGL()
 
         // Restore defaults
         glDepthMask(GL_TRUE);
+        glDisable(GL_BLEND);
+        glDisable(GL_CULL_FACE);
         particleProgram_.release();
     }
 }
@@ -859,9 +900,16 @@ void GLModelView::wheelEvent(QWheelEvent* e)
 
 void GLModelView::clearGpuResources()
 {
-    if (ibo_) { glDeleteBuffers(1, &ibo_); ibo_ = 0; }
-    if (vbo_) { glDeleteBuffers(1, &vbo_); vbo_ = 0; }
-    if (vao_) { glDeleteVertexArrays(1, &vao_); vao_ = 0; }
+    for (auto it = gpuCache_.begin(); it != gpuCache_.end(); ++it)
+    {
+        if (it->ibo) glDeleteBuffers(1, &it->ibo);
+        if (it->vbo) glDeleteBuffers(1, &it->vbo);
+        if (it->vao) glDeleteVertexArrays(1, &it->vao);
+    }
+    gpuCache_.clear();
+    ibo_ = 0;
+    vbo_ = 0;
+    vao_ = 0;
 
     if (pVbo_) { glDeleteBuffers(1, &pVbo_); pVbo_ = 0; }
     if (pVao_) { glDeleteVertexArrays(1, &pVao_); pVao_ = 0; }
@@ -878,6 +926,16 @@ void GLModelView::clearGpuResources()
         glDeleteTextures(1, &placeholderTex_);
         placeholderTex_ = 0;
     }
+    if (teamColorTex_ != 0)
+    {
+        glDeleteTextures(1, &teamColorTex_);
+        teamColorTex_ = 0;
+    }
+    if (teamGlowTex_ != 0)
+    {
+        glDeleteTextures(1, &teamGlowTex_);
+        teamGlowTex_ = 0;
+    }
 
     gpuSubmeshes_.clear();
 }
@@ -885,9 +943,6 @@ void GLModelView::clearGpuResources()
 void GLModelView::rebuildGpuBuffers()
 {
     // Mesh buffers are tied to model geometry. Particles have their own buffers created in initializeGL.
-    if (ibo_) { glDeleteBuffers(1, &ibo_); ibo_ = 0; }
-    if (vbo_) { glDeleteBuffers(1, &vbo_); vbo_ = 0; }
-    if (vao_) { glDeleteVertexArrays(1, &vao_); vao_ = 0; }
     gpuSubmeshes_.clear();
 
     if (!model_ || model_->vertices.empty() || model_->indices.empty())
@@ -895,6 +950,19 @@ void GLModelView::rebuildGpuBuffers()
         if (placeholderTex_ == 0)
             placeholderTex_ = createPlaceholderTexture();
         return;
+    }
+
+    if (!modelPath_.isEmpty())
+    {
+        auto it = gpuCache_.find(modelPath_);
+        if (it != gpuCache_.end())
+        {
+            vao_ = it->vao;
+            vbo_ = it->vbo;
+            ibo_ = it->ibo;
+            gpuSubmeshes_ = it->submeshes;
+            return;
+        }
     }
 
     // Upload vertex/index data
@@ -937,36 +1005,105 @@ void GLModelView::rebuildGpuBuffers()
 
     if (placeholderTex_ == 0)
         placeholderTex_ = createPlaceholderTexture();
+
+    if (!modelPath_.isEmpty())
+    {
+        GpuCacheEntry entry;
+        entry.vao = vao_;
+        entry.vbo = vbo_;
+        entry.ibo = ibo_;
+        entry.submeshes = gpuSubmeshes_;
+        gpuCache_.insert(modelPath_, entry);
+    }
 }
 
-QString GLModelView::resolveTexturePath(const std::string& mdxPath) const
+GLModelView::TextureResolve GLModelView::resolveTexturePath(const std::string& mdxPath) const
 {
+    TextureResolve res;
     if (assetRoot_.isEmpty())
-        return {};
+        return res;
 
     QString p = QString::fromStdString(mdxPath).trimmed();
-    if (p.isEmpty()) return {};
+    if (p.isEmpty()) return res;
 
     p = normPath(p);
 
-    // Some models store "war3mapImported/..." when bundled in maps; try stripping.
-    const QString lower = p.toLower();
-    if (lower.startsWith("war3mapimported/"))
-        p = p.mid(QString("war3mapImported/").length());
+    auto tryPath = [&](const QString& base, const QString& rel, const QString& source) -> bool
+    {
+        const QString candidate = QDir(base).filePath(rel);
+        if (QFileInfo::exists(candidate))
+        {
+            res.path = candidate;
+            res.source = source;
+            return true;
+        }
+        return false;
+    };
 
-    const QString direct = QDir(assetRoot_).filePath(p);
-    if (QFileInfo::exists(direct))
-        return direct;
+    // Absolute path?
+    if (QFileInfo(p).isAbsolute() && QFileInfo::exists(p))
+    {
+        res.path = p;
+        res.source = "absolute";
+        return res;
+    }
 
-    // Try as basename search (first hit)
-    const QString base = QFileInfo(p).fileName();
-    if (base.isEmpty()) return {};
+    const QString baseName = QFileInfo(p).fileName();
+    if (baseName.isEmpty())
+        return res;
 
-    QDirIterator it(assetRoot_, QStringList() << base, QDir::Files, QDirIterator::Subdirectories);
+    // 1) Same directory as model
+    if (!modelDir_.isEmpty())
+    {
+        if (tryPath(modelDir_, p, "model-dir"))
+            return res;
+        if (tryPath(modelDir_, baseName, "model-dir-basename"))
+            return res;
+    }
+
+    // 2) Common Warcraft III folders (within asset root)
+    const QStringList commonDirs = {
+        "Textures",
+        "ReplaceableTextures/TeamColor",
+        "ReplaceableTextures/TeamGlow",
+        "ReplaceableTextures",
+        "Units",
+        "Buildings",
+        "Doodads",
+        "Environment",
+        "UI",
+        "Abilities",
+        "Splats",
+        "Terrain"
+    };
+    for (const auto& dir : commonDirs)
+    {
+        if (tryPath(assetRoot_, dir + "/" + baseName, "common:" + dir))
+            return res;
+        if (tryPath(assetRoot_, dir + "/" + p, "common:" + dir))
+            return res;
+    }
+
+    // 3) war3mapImported folder
+    if (tryPath(assetRoot_, "war3mapImported/" + baseName, "war3mapImported"))
+        return res;
+    if (tryPath(assetRoot_, "war3mapImported/" + p, "war3mapImported"))
+        return res;
+
+    // 4) Direct path under asset root
+    if (tryPath(assetRoot_, p, "asset-root"))
+        return res;
+
+    // 5) Basename search (first hit)
+    QDirIterator it(assetRoot_, QStringList() << baseName, QDir::Files, QDirIterator::Subdirectories);
     if (it.hasNext())
-        return it.next();
+    {
+        res.path = it.next();
+        res.source = "basename-search";
+        return res;
+    }
 
-    return {};
+    return res;
 }
 
 GLuint GLModelView::createPlaceholderTexture()
@@ -1006,24 +1143,67 @@ GLuint GLModelView::getOrCreateTexture(std::uint32_t textureId)
     {
         const auto& tex = model_->textures[textureId];
 
+        if (tex.replaceableId == 1)
+        {
+            if (teamColorTex_ == 0)
+            {
+                const unsigned char pixels[4] = { 20, 120, 255, 255 };
+                glGenTextures(1, &teamColorTex_);
+                glBindTexture(GL_TEXTURE_2D, teamColorTex_);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+                glBindTexture(GL_TEXTURE_2D, 0);
+            }
+            handle.id = teamColorTex_;
+            handle.path = "ReplaceableTextures/TeamColor";
+            handle.source = "replaceable:TeamColor";
+            textureCache_[textureId] = handle;
+            LogSink::instance().log(QString("Texture %1 replaceable TeamColor").arg(textureId));
+            return handle.id;
+        }
+        if (tex.replaceableId == 2)
+        {
+            if (teamGlowTex_ == 0)
+            {
+                const unsigned char pixels[4] = { 255, 200, 40, 255 };
+                glGenTextures(1, &teamGlowTex_);
+                glBindTexture(GL_TEXTURE_2D, teamGlowTex_);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+                glBindTexture(GL_TEXTURE_2D, 0);
+            }
+            handle.id = teamGlowTex_;
+            handle.path = "ReplaceableTextures/TeamGlow";
+            handle.source = "replaceable:TeamGlow";
+            textureCache_[textureId] = handle;
+            LogSink::instance().log(QString("Texture %1 replaceable TeamGlow").arg(textureId));
+            return handle.id;
+        }
+
         // Replaceable textures (team color, etc.) aren't resolved here.
         if (!tex.fileName.empty())
         {
-            const QString resolved = resolveTexturePath(tex.fileName);
-            if (!resolved.isEmpty())
+            const auto resolved = resolveTexturePath(tex.fileName);
+            if (!resolved.path.isEmpty())
             {
                 QImage img;
                 QString err;
-                const QString ext = QFileInfo(resolved).suffix().toLower();
+                const QString ext = QFileInfo(resolved.path).suffix().toLower();
                 bool ok = false;
 
                 if (ext == "blp")
                 {
-                    ok = BlpLoader::LoadBlpToImage(resolved, &img, &err);
+                    ok = BlpLoader::LoadBlpToImageCached(resolved.path, &img, &err);
                 }
                 else
                 {
-                    ok = img.load(resolved);
+                    ok = img.load(resolved.path);
                     if (!ok) err = "Qt failed to load image.";
                     if (ok && img.format() != QImage::Format_RGBA8888)
                         img = img.convertToFormat(QImage::Format_RGBA8888);
@@ -1049,11 +1229,26 @@ GLuint GLModelView::getOrCreateTexture(std::uint32_t textureId)
                     glBindTexture(GL_TEXTURE_2D, 0);
 
                     handle.id = gltex;
+                    handle.path = resolved.path;
+                    handle.source = resolved.source;
+                    LogSink::instance().log(QString("Texture %1 hit %2 -> %3")
+                                                .arg(textureId)
+                                                .arg(handle.source)
+                                                .arg(handle.path));
                 }
                 else
                 {
-                    // keep placeholder
+                    LogSink::instance().log(QString("Texture %1 failed to load %2 | %3")
+                                                .arg(textureId)
+                                                .arg(resolved.path)
+                                                .arg(err));
                 }
+            }
+            else
+            {
+                LogSink::instance().log(QString("Texture %1 not found: %2")
+                                            .arg(textureId)
+                                            .arg(QString::fromStdString(tex.fileName)));
             }
         }
     }
