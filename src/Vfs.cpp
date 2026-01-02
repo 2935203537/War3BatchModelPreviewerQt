@@ -6,7 +6,17 @@
 
 #include "LogSink.h"
 
+#ifdef _UNICODE
+#define STORMLIB_UNICODE_WAS_DEFINED
+#undef _UNICODE
+#undef UNICODE
+#endif
 #include <StormLib.h>
+#ifdef STORMLIB_UNICODE_WAS_DEFINED
+#define _UNICODE 1
+#define UNICODE 1
+#undef STORMLIB_UNICODE_WAS_DEFINED
+#endif
 #include <windows.h>
 
 DiskVfs::DiskVfs(QString rootPath)
@@ -123,12 +133,8 @@ bool MpqVfs::mountWar3Root(const QString& rootPath)
             continue;
 
         HANDLE h = nullptr;
-#ifdef UNICODE
-        const auto* fullPath = reinterpret_cast<const wchar_t*>(full.utf16());
-#else
         const QByteArray fullBytes = QFile::encodeName(full);
         const auto* fullPath = fullBytes.constData();
-#endif
         if (SFileOpenArchive(fullPath, 0, MPQ_OPEN_READ_ONLY, &h))
         {
             Archive a;

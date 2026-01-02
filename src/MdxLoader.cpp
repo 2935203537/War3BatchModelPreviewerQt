@@ -476,7 +476,7 @@ namespace
                 if (s == 0 && i < out.vertices.size())
                 {
                     out.vertices[i].u = u;
-                    out.vertices[i].v = v;
+                    out.vertices[i].v = 1.0f - v;
                 }
             }
             // Skip extra coords if tcCount > vertexCount

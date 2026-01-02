@@ -88,24 +88,44 @@ namespace
         return { lerpf(a.x, b.x, t), lerpf(a.y, b.y, t), lerpf(a.z, b.z, t), lerpf(a.w, b.w, t) };
     }
 
-    static Vec4 hermiteVec4(const Vec4& p0, const Vec4& m0, const Vec4& p1, const Vec4& m1, float t)
+    static Vec4 normalizeQuat(const Vec4& q)
     {
-        return {
-            hermite(p0.x, m0.x, p1.x, m1.x, t),
-            hermite(p0.y, m0.y, p1.y, m1.y, t),
-            hermite(p0.z, m0.z, p1.z, m1.z, t),
-            hermite(p0.w, m0.w, p1.w, m1.w, t)
-        };
+        const float len = std::sqrt(q.x*q.x + q.y*q.y + q.z*q.z + q.w*q.w);
+        if (len <= 0.000001f)
+            return {0,0,0,1};
+        const float inv = 1.0f / len;
+        return { q.x * inv, q.y * inv, q.z * inv, q.w * inv };
     }
 
-    static Vec4 bezierVec4(const Vec4& p0, const Vec4& c1, const Vec4& c2, const Vec4& p1, float t)
+    static float dotQuat(const Vec4& a, const Vec4& b)
     {
-        return {
-            bezier(p0.x, c1.x, c2.x, p1.x, t),
-            bezier(p0.y, c1.y, c2.y, p1.y, t),
-            bezier(p0.z, c1.z, c2.z, p1.z, t),
-            bezier(p0.w, c1.w, c2.w, p1.w, t)
-        };
+        return a.x*b.x + a.y*b.y + a.z*b.z + a.w*b.w;
+    }
+
+    static Vec4 slerpQuat(Vec4 a, Vec4 b, float t, bool invertIfNecessary)
+    {
+        float dot = dotQuat(a, b);
+        if (invertIfNecessary && dot < 0.0f)
+        {
+            dot = -dot;
+            b.x = -b.x; b.y = -b.y; b.z = -b.z; b.w = -b.w;
+        }
+
+        if (dot > 0.95f)
+        {
+            return normalizeQuat(lerpVec4(a, b, t));
+        }
+
+        dot = clampf(dot, -1.0f, 1.0f);
+        const float theta0 = std::acos(dot);
+        const float sinTheta0 = std::sin(theta0);
+        if (sinTheta0 <= 0.000001f)
+            return normalizeQuat(lerpVec4(a, b, t));
+        const float theta = theta0 * t;
+        const float sinTheta = std::sin(theta);
+        const float s0 = std::cos(theta) - dot * sinTheta / sinTheta0;
+        const float s1 = sinTheta / sinTheta0;
+        return { a.x * s0 + b.x * s1, a.y * s0 + b.y * s1, a.z * s0 + b.z * s1, a.w * s0 + b.w * s1 };
     }
 
     static float sampleTrackFloat(const MdxTrack<float>& tr, std::uint32_t timeMs, float def, const ModelData& model)
@@ -201,7 +221,7 @@ namespace
         }
     }
 
-    static Vec4 sampleTrackVec4(const MdxTrack<Vec4>& tr, std::uint32_t timeMs, const Vec4& def, const ModelData& model)
+    static Vec4 sampleTrackQuat(const MdxTrack<Vec4>& tr, std::uint32_t timeMs, const Vec4& def, const ModelData& model)
     {
         if (tr.keys.empty())
             return def;
@@ -215,15 +235,15 @@ namespace
 
         const auto& keys = tr.keys;
         if (timeMs <= keys.front().timeMs)
-            return keys.front().value;
+            return normalizeQuat(keys.front().value);
         if (timeMs >= keys.back().timeMs)
-            return keys.back().value;
+            return normalizeQuat(keys.back().value);
 
         std::size_t hi = 1;
         while (hi < keys.size() && timeMs > keys[hi].timeMs)
             ++hi;
         if (hi >= keys.size())
-            return keys.back().value;
+            return normalizeQuat(keys.back().value);
         const std::size_t lo = hi - 1;
 
         const auto& k0 = keys[lo];
@@ -234,15 +254,26 @@ namespace
         switch (tr.interp)
         {
         case MdxInterp::None:
-            return k0.value;
+            return normalizeQuat(k0.value);
         case MdxInterp::Linear:
-            return lerpVec4(k0.value, k1.value, t);
+            return slerpQuat(k0.value, k1.value, t, true);
         case MdxInterp::Hermite:
-            return hermiteVec4(k0.value, k0.outTan, k1.value, k1.inTan, t);
+        {
+            const Vec4 slerp = slerpQuat(k0.value, k1.value, t, false);
+            const Vec4 slerpTan = slerpQuat(k0.outTan, k1.inTan, t, false);
+            return slerpQuat(slerp, slerpTan, 2.0f * t * (1.0f - t), false);
+        }
         case MdxInterp::Bezier:
-            return bezierVec4(k0.value, k0.outTan, k1.inTan, k1.value, t);
+        {
+            const Vec4 s0 = slerpQuat(k0.value, k0.outTan, t, false);
+            const Vec4 s1 = slerpQuat(k0.outTan, k1.inTan, t, false);
+            const Vec4 s2 = slerpQuat(k1.inTan, k1.value, t, false);
+            const Vec4 s3 = slerpQuat(s0, s1, t, false);
+            const Vec4 s4 = slerpQuat(s1, s2, t, false);
+            return slerpQuat(s3, s4, t, false);
+        }
         default:
-            return k0.value;
+            return normalizeQuat(k0.value);
         }
     }
 
@@ -251,6 +282,10 @@ namespace
     constexpr std::uint32_t LAYER_TWOSIDED   = 0x10;
     constexpr std::uint32_t LAYER_NODEPTH    = 0x40;
     constexpr std::uint32_t LAYER_NODEPTHSET = 0x80;
+
+    constexpr std::uint32_t NODE_DONT_INHERIT_TRANSLATION = 0x1;
+    constexpr std::uint32_t NODE_DONT_INHERIT_ROTATION    = 0x2;
+    constexpr std::uint32_t NODE_DONT_INHERIT_SCALING     = 0x4;
 }
 
 GLModelView::GLModelView(QWidget* parent)
@@ -457,6 +492,10 @@ void GLModelView::initializeGL()
         glLoggerReady_ = true;
         connect(&glLogger_, &QOpenGLDebugLogger::messageLogged, this,
                 [this](const QOpenGLDebugMessage& msg){
+                    if (msg.severity() == QOpenGLDebugMessage::NotificationSeverity)
+                        return;
+                    if (msg.id() == 131185 || msg.id() == 131169)
+                        return;
                     const QString line = QString("GL: [%1] %2 (id=%3)")
                                              .arg(msg.severity())
                                              .arg(msg.message())
@@ -920,6 +959,50 @@ void GLModelView::updateSkinning(std::uint32_t globalTimeMs)
     std::vector<QMatrix4x4> nodeWorld(nodeCount);
     std::vector<int> state(nodeCount, 0);
 
+    auto adjustParentForChild = [&](const QMatrix4x4& parent, std::uint32_t flags) -> QMatrix4x4
+    {
+        const bool inheritT = (flags & NODE_DONT_INHERIT_TRANSLATION) == 0;
+        const bool inheritR = (flags & NODE_DONT_INHERIT_ROTATION) == 0;
+        const bool inheritS = (flags & NODE_DONT_INHERIT_SCALING) == 0;
+
+        QVector3D t(parent(0,3), parent(1,3), parent(2,3));
+        QVector3D c0(parent(0,0), parent(1,0), parent(2,0));
+        QVector3D c1(parent(0,1), parent(1,1), parent(2,1));
+        QVector3D c2(parent(0,2), parent(1,2), parent(2,2));
+
+        float sx = c0.length();
+        float sy = c1.length();
+        float sz = c2.length();
+        if (sx > 0.000001f) c0 /= sx;
+        if (sy > 0.000001f) c1 /= sy;
+        if (sz > 0.000001f) c2 /= sz;
+
+        if (!inheritR)
+        {
+            c0 = QVector3D(1,0,0);
+            c1 = QVector3D(0,1,0);
+            c2 = QVector3D(0,0,1);
+        }
+        if (!inheritS)
+        {
+            sx = 1.0f;
+            sy = 1.0f;
+            sz = 1.0f;
+        }
+        if (!inheritT)
+        {
+            t = QVector3D(0,0,0);
+        }
+
+        QMatrix4x4 out;
+        out.setToIdentity();
+        out.setColumn(0, QVector4D(c0.x()*sx, c0.y()*sx, c0.z()*sx, 0.0f));
+        out.setColumn(1, QVector4D(c1.x()*sy, c1.y()*sy, c1.z()*sy, 0.0f));
+        out.setColumn(2, QVector4D(c2.x()*sz, c2.y()*sz, c2.z()*sz, 0.0f));
+        out.setColumn(3, QVector4D(t.x(), t.y(), t.z(), 1.0f));
+        return out;
+    };
+
     auto buildNode = [&](auto&& self, std::size_t idx) -> void
     {
         if (idx >= nodeCount)
@@ -941,12 +1024,7 @@ void GLModelView::updateSkinning(std::uint32_t globalTimeMs)
 
         const Vec3 t = sampleTrackVec3(n.trackTranslation, globalTimeMs, defT, *model_);
         const Vec3 s = sampleTrackVec3(n.trackScaling, globalTimeMs, defS, *model_);
-        Vec4 r = sampleTrackVec4(n.trackRotation, globalTimeMs, defR, *model_);
-        const float rlen = std::sqrt(r.x*r.x + r.y*r.y + r.z*r.z + r.w*r.w);
-        if (rlen > 0.00001f)
-        {
-            r.x /= rlen; r.y /= rlen; r.z /= rlen; r.w /= rlen;
-        }
+        Vec4 r = sampleTrackQuat(n.trackRotation, globalTimeMs, defR, *model_);
 
         const QVector3D pivot(n.pivot.x, n.pivot.y, n.pivot.z);
         QQuaternion q(r.w, r.x, r.y, r.z);
@@ -961,7 +1039,10 @@ void GLModelView::updateSkinning(std::uint32_t globalTimeMs)
         if (n.parentId >= 0 && std::size_t(n.parentId) < nodeCount)
         {
             self(self, std::size_t(n.parentId));
-            nodeWorld[idx] = nodeWorld[std::size_t(n.parentId)] * local;
+            const QMatrix4x4 parentAdj = adjustParentForChild(
+                nodeWorld[std::size_t(n.parentId)],
+                n.flags);
+            nodeWorld[idx] = parentAdj * local;
         }
         else
         {
@@ -995,42 +1076,43 @@ void GLModelView::updateSkinning(std::uint32_t globalTimeMs)
             continue;
         }
 
-        QVector3D accPos(0,0,0);
-        QVector3D accNrm(0,0,0);
-        int used = 0;
-        for (int nodeIndex : group.nodeIndices)
+        QVector3D posSum(0,0,0);
+        QVector3D nrmSum(0,0,0);
+        int validCount = 0;
+        for (int candidate : group.nodeIndices)
         {
-            if (nodeIndex < 0 || std::size_t(nodeIndex) >= nodeWorld.size())
+            if (candidate < 0 || std::size_t(candidate) >= nodeWorld.size())
                 continue;
-            const QMatrix4x4& m = nodeWorld[std::size_t(nodeIndex)];
+            const QMatrix4x4& m = nodeWorld[std::size_t(candidate)];
             const QVector3D p = m.map(QVector3D(base.px, base.py, base.pz));
             const QMatrix3x3 nrmMat = m.normalMatrix();
             const QVector3D n = QVector3D(
                 nrmMat(0,0) * base.nx + nrmMat(0,1) * base.ny + nrmMat(0,2) * base.nz,
                 nrmMat(1,0) * base.nx + nrmMat(1,1) * base.ny + nrmMat(1,2) * base.nz,
                 nrmMat(2,0) * base.nx + nrmMat(2,1) * base.ny + nrmMat(2,2) * base.nz
-            ).normalized();
-            accPos += p;
-            accNrm += n;
-            used++;
+            );
+            posSum += p;
+            nrmSum += n;
+            ++validCount;
         }
 
-        if (used == 0)
+        if (validCount == 0)
         {
             skinnedVertices_[i] = base;
             continue;
         }
 
-        accPos /= float(used);
-        accNrm.normalize();
+        const float inv = 1.0f / float(validCount);
+        const QVector3D p = posSum * inv;
+        const QVector3D n = (nrmSum * inv).normalized();
 
         ModelVertex v = base;
-        v.px = accPos.x();
-        v.py = accPos.y();
-        v.pz = accPos.z();
-        v.nx = accNrm.x();
-        v.ny = accNrm.y();
-        v.nz = accNrm.z();
+        v.px = p.x();
+        v.py = p.y();
+        v.pz = p.z();
+        v.nx = n.x();
+        v.ny = n.y();
+        v.nz = n.z();
         skinnedVertices_[i] = v;
     }
 
@@ -1866,10 +1948,7 @@ GLuint GLModelView::getOrCreateTexture(std::uint32_t textureId)
 
                 if (ok && !img.isNull())
                 {
-                    // Flip vertically for OpenGL UV origin.
-                    img = img.flipped(Qt::Vertical);
-
-                    GLuint gltex = 0;
+                      GLuint gltex = 0;
                     glGenTextures(1, &gltex);
                     glBindTexture(GL_TEXTURE_2D, gltex);
                     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
@@ -1935,9 +2014,7 @@ GLuint GLModelView::getOrCreateTexture(std::uint32_t textureId)
 
                 if (ok && !img.isNull())
                 {
-                    img = img.flipped(Qt::Vertical);
-
-                    GLuint gltex = 0;
+                      GLuint gltex = 0;
                     glGenTextures(1, &gltex);
                     glBindTexture(GL_TEXTURE_2D, gltex);
                     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);

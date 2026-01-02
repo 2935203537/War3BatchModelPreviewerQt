@@ -84,6 +84,215 @@ namespace
         // Unknown alpha depth
         return 255;
     }
+
+    static void color565(quint16 c, quint8& r, quint8& g, quint8& b)
+    {
+        r = quint8(((c >> 11) & 31) * 255 / 31);
+        g = quint8(((c >> 5) & 63) * 255 / 63);
+        b = quint8((c & 31) * 255 / 31);
+    }
+
+    static void decodeDxt1(const quint8* src, quint32 w, quint32 h, std::vector<quint8>& out)
+    {
+        out.assign(size_t(w) * size_t(h) * 4, 0);
+        const quint32 blocksX = (w + 3) / 4;
+        const quint32 blocksY = (h + 3) / 4;
+
+        for (quint32 by = 0; by < blocksY; ++by)
+        {
+            for (quint32 bx = 0; bx < blocksX; ++bx)
+            {
+                const quint8* block = src + (by * blocksX + bx) * 8;
+                const quint16 c0 = quint16(block[0] | (block[1] << 8));
+                const quint16 c1 = quint16(block[2] | (block[3] << 8));
+                quint8 r0=0,g0=0,b0=0,r1=0,g1=0,b1=0;
+                color565(c0, r0, g0, b0);
+                color565(c1, r1, g1, b1);
+
+                quint8 colors[4][4];
+                colors[0][0]=r0; colors[0][1]=g0; colors[0][2]=b0; colors[0][3]=255;
+                colors[1][0]=r1; colors[1][1]=g1; colors[1][2]=b1; colors[1][3]=255;
+
+                if (c0 > c1)
+                {
+                    colors[2][0] = quint8((2 * r0 + r1) / 3);
+                    colors[2][1] = quint8((2 * g0 + g1) / 3);
+                    colors[2][2] = quint8((2 * b0 + b1) / 3);
+                    colors[2][3] = 255;
+                    colors[3][0] = quint8((r0 + 2 * r1) / 3);
+                    colors[3][1] = quint8((g0 + 2 * g1) / 3);
+                    colors[3][2] = quint8((b0 + 2 * b1) / 3);
+                    colors[3][3] = 255;
+                }
+                else
+                {
+                    colors[2][0] = quint8((r0 + r1) / 2);
+                    colors[2][1] = quint8((g0 + g1) / 2);
+                    colors[2][2] = quint8((b0 + b1) / 2);
+                    colors[2][3] = 255;
+                    colors[3][0] = 0; colors[3][1] = 0; colors[3][2] = 0; colors[3][3] = 0;
+                }
+
+                quint32 code = block[4] | (block[5] << 8) | (block[6] << 16) | (block[7] << 24);
+                for (quint32 py = 0; py < 4; ++py)
+                {
+                    for (quint32 px = 0; px < 4; ++px)
+                    {
+                        const quint32 idx = code & 0x3;
+                        code >>= 2;
+                        const quint32 x = bx * 4 + px;
+                        const quint32 y = by * 4 + py;
+                        if (x >= w || y >= h) continue;
+                        const size_t dst = (size_t(y) * size_t(w) + x) * 4;
+                        out[dst + 0] = colors[idx][0];
+                        out[dst + 1] = colors[idx][1];
+                        out[dst + 2] = colors[idx][2];
+                        out[dst + 3] = colors[idx][3];
+                    }
+                }
+            }
+        }
+    }
+
+    static void decodeDxt3(const quint8* src, quint32 w, quint32 h, std::vector<quint8>& out)
+    {
+        out.assign(size_t(w) * size_t(h) * 4, 0);
+        const quint32 blocksX = (w + 3) / 4;
+        const quint32 blocksY = (h + 3) / 4;
+
+        for (quint32 by = 0; by < blocksY; ++by)
+        {
+            for (quint32 bx = 0; bx < blocksX; ++bx)
+            {
+                const quint8* block = src + (by * blocksX + bx) * 16;
+                const quint8* alpha = block;
+                const quint8* color = block + 8;
+
+                const quint16 c0 = quint16(color[0] | (color[1] << 8));
+                const quint16 c1 = quint16(color[2] | (color[3] << 8));
+                quint8 r0=0,g0=0,b0=0,r1=0,g1=0,b1=0;
+                color565(c0, r0, g0, b0);
+                color565(c1, r1, g1, b1);
+
+                quint8 colors[4][4];
+                colors[0][0]=r0; colors[0][1]=g0; colors[0][2]=b0; colors[0][3]=255;
+                colors[1][0]=r1; colors[1][1]=g1; colors[1][2]=b1; colors[1][3]=255;
+                colors[2][0] = quint8((2 * r0 + r1) / 3);
+                colors[2][1] = quint8((2 * g0 + g1) / 3);
+                colors[2][2] = quint8((2 * b0 + b1) / 3);
+                colors[2][3] = 255;
+                colors[3][0] = quint8((r0 + 2 * r1) / 3);
+                colors[3][1] = quint8((g0 + 2 * g1) / 3);
+                colors[3][2] = quint8((b0 + 2 * b1) / 3);
+                colors[3][3] = 255;
+
+                quint32 code = color[4] | (color[5] << 8) | (color[6] << 16) | (color[7] << 24);
+                for (quint32 py = 0; py < 4; ++py)
+                {
+                    for (quint32 px = 0; px < 4; ++px)
+                    {
+                        const quint32 aIdx = py * 4 + px;
+                        const quint8 aByte = alpha[aIdx / 2];
+                        const quint8 aNib = (aIdx % 2 == 0) ? (aByte & 0x0F) : (aByte >> 4);
+                        const quint8 a = quint8(aNib * 17);
+
+                        const quint32 idx = code & 0x3;
+                        code >>= 2;
+                        const quint32 x = bx * 4 + px;
+                        const quint32 y = by * 4 + py;
+                        if (x >= w || y >= h) continue;
+                        const size_t dst = (size_t(y) * size_t(w) + x) * 4;
+                        out[dst + 0] = colors[idx][0];
+                        out[dst + 1] = colors[idx][1];
+                        out[dst + 2] = colors[idx][2];
+                        out[dst + 3] = a;
+                    }
+                }
+            }
+        }
+    }
+
+    static void decodeDxt5(const quint8* src, quint32 w, quint32 h, std::vector<quint8>& out)
+    {
+        out.assign(size_t(w) * size_t(h) * 4, 0);
+        const quint32 blocksX = (w + 3) / 4;
+        const quint32 blocksY = (h + 3) / 4;
+
+        for (quint32 by = 0; by < blocksY; ++by)
+        {
+            for (quint32 bx = 0; bx < blocksX; ++bx)
+            {
+                const quint8* block = src + (by * blocksX + bx) * 16;
+                const quint8 a0 = block[0];
+                const quint8 a1 = block[1];
+                const quint8* aBits = block + 2;
+
+                quint8 alpha[8];
+                alpha[0] = a0;
+                alpha[1] = a1;
+                if (a0 > a1)
+                {
+                    alpha[2] = quint8((6 * a0 + 1 * a1) / 7);
+                    alpha[3] = quint8((5 * a0 + 2 * a1) / 7);
+                    alpha[4] = quint8((4 * a0 + 3 * a1) / 7);
+                    alpha[5] = quint8((3 * a0 + 4 * a1) / 7);
+                    alpha[6] = quint8((2 * a0 + 5 * a1) / 7);
+                    alpha[7] = quint8((1 * a0 + 6 * a1) / 7);
+                }
+                else
+                {
+                    alpha[2] = quint8((4 * a0 + 1 * a1) / 5);
+                    alpha[3] = quint8((3 * a0 + 2 * a1) / 5);
+                    alpha[4] = quint8((2 * a0 + 3 * a1) / 5);
+                    alpha[5] = quint8((1 * a0 + 4 * a1) / 5);
+                    alpha[6] = 0;
+                    alpha[7] = 255;
+                }
+
+                const quint16 c0 = quint16(block[8] | (block[9] << 8));
+                const quint16 c1 = quint16(block[10] | (block[11] << 8));
+                quint8 r0=0,g0=0,b0=0,r1=0,g1=0,b1=0;
+                color565(c0, r0, g0, b0);
+                color565(c1, r1, g1, b1);
+
+                quint8 colors[4][4];
+                colors[0][0]=r0; colors[0][1]=g0; colors[0][2]=b0; colors[0][3]=255;
+                colors[1][0]=r1; colors[1][1]=g1; colors[1][2]=b1; colors[1][3]=255;
+                colors[2][0] = quint8((2 * r0 + r1) / 3);
+                colors[2][1] = quint8((2 * g0 + g1) / 3);
+                colors[2][2] = quint8((2 * b0 + b1) / 3);
+                colors[2][3] = 255;
+                colors[3][0] = quint8((r0 + 2 * r1) / 3);
+                colors[3][1] = quint8((g0 + 2 * g1) / 3);
+                colors[3][2] = quint8((b0 + 2 * b1) / 3);
+                colors[3][3] = 255;
+
+                quint32 code = block[12] | (block[13] << 8) | (block[14] << 16) | (block[15] << 24);
+                quint64 aCode = 0;
+                for (int i = 0; i < 6; ++i)
+                    aCode |= (quint64(aBits[i]) << (8 * i));
+
+                for (quint32 py = 0; py < 4; ++py)
+                {
+                    for (quint32 px = 0; px < 4; ++px)
+                    {
+                        const quint32 aIdx = quint32(aCode & 0x7);
+                        aCode >>= 3;
+                        const quint32 idx = code & 0x3;
+                        code >>= 2;
+                        const quint32 x = bx * 4 + px;
+                        const quint32 y = by * 4 + py;
+                        if (x >= w || y >= h) continue;
+                        const size_t dst = (size_t(y) * size_t(w) + x) * 4;
+                        out[dst + 0] = colors[idx][0];
+                        out[dst + 1] = colors[idx][1];
+                        out[dst + 2] = colors[idx][2];
+                        out[dst + 3] = alpha[aIdx];
+                    }
+                }
+            }
+        }
+    }
 }
 
 namespace BlpLoader
@@ -133,6 +342,7 @@ namespace BlpLoader
         }
 
         quint32 alphaBits = 0;
+        quint8 alphaType = 0;
         quint8 encodingType = 0, sampleType = 0, hasMipmaps_u8 = 0, alphaBits_u8 = 0;
         if (version >= 2)
         {
@@ -141,7 +351,9 @@ namespace BlpLoader
                 setErr(outError, "Failed reading BLP2 fields.");
                 return false;
             }
-            alphaBits = alphaBits_u8;
+            // BLP2 layout: alphaBits, alphaType, hasMipmaps, unknown
+            alphaBits = encodingType;
+            alphaType = alphaBits_u8;
         }
         else
         {
@@ -191,7 +403,12 @@ namespace BlpLoader
         // Content header
         QByteArray jpegHeader;
         quint32 palette[256] = {};
-        if (content == 0) // JPEG
+        const quint32 compression = (version >= 2) ? content : 0;
+        const bool isJpeg = (version >= 2) ? (compression == 0) : (content == 0);
+        const bool isPaletted = (version >= 2) ? (compression == 2) : (content == 1);
+        const bool isDxt = (version >= 2) ? (compression == 1) : false;
+
+        if (isJpeg) // JPEG
         {
             quint32 jpegHeaderSize = 0;
             if (!r.readU32(jpegHeaderSize))
@@ -211,15 +428,8 @@ namespace BlpLoader
                 return false;
             }
         }
-        else if (content == 1) // Direct
+        else if (isPaletted) // Paletted
         {
-            if (version >= 2 && encodingType != 1)
-            {
-                // BLP2 can store DXT etc; we only support palettized here.
-                setErr(outError, "BLP2 direct encoding is not supported (expected palettized encodingType=1)."
-                                 " Consider converting textures to BLP1 palettized or .png for preview.");
-                return false;
-            }
             for (int i = 0; i < 256; ++i)
             {
                 if (!r.readU32(palette[i]))
@@ -250,7 +460,7 @@ namespace BlpLoader
 
         const unsigned char* mip0 = reinterpret_cast<const unsigned char*>(bytes.constData()) + off0;
 
-        if (content == 1)
+        if (isPaletted)
         {
             if (width == 0 || height == 0)
             {
@@ -293,9 +503,10 @@ namespace BlpLoader
                     const quint32 i = y * width + x;
                     const quint8 palIndex = idxData[i];
                     const quint32 p = palette[palIndex];
-                    const quint8 rC = quint8(p & 0xFF);
+                    // BLP palette entries are stored as BGRA.
+                    const quint8 bC = quint8(p & 0xFF);
                     const quint8 gC = quint8((p >> 8) & 0xFF);
-                    const quint8 bC = quint8((p >> 16) & 0xFF);
+                    const quint8 rC = quint8((p >> 16) & 0xFF);
                     const quint8 aC = alphaForPixel(alphaData, alphaBits, i);
 
                     // RGBA8888
@@ -306,6 +517,40 @@ namespace BlpLoader
                 }
             }
 
+            *outImage = img;
+            return true;
+        }
+        else if (isDxt)
+        {
+            if (width == 0 || height == 0)
+            {
+                setErr(outError, "Invalid dimensions.");
+                return false;
+            }
+            std::vector<quint8> rgba;
+            if (alphaType == 0)
+                decodeDxt1(mip0, width, height, rgba);
+            else if (alphaType == 1)
+                decodeDxt3(mip0, width, height, rgba);
+            else if (alphaType == 7)
+                decodeDxt5(mip0, width, height, rgba);
+            else
+                decodeDxt1(mip0, width, height, rgba);
+
+            QImage img(int(width), int(height), QImage::Format_RGBA8888);
+            if (img.isNull())
+            {
+                setErr(outError, "Failed creating QImage for DXT.");
+                return false;
+            }
+            const int stride = img.bytesPerLine();
+            const quint8* src = rgba.data();
+            for (quint32 y = 0; y < height; ++y)
+            {
+                memcpy(img.bits() + y * stride,
+                       src + size_t(y) * size_t(width) * 4,
+                       size_t(width) * 4);
+            }
             *outImage = img;
             return true;
         }
@@ -326,6 +571,9 @@ namespace BlpLoader
 
             if (img.format() != QImage::Format_RGBA8888)
                 img = img.convertToFormat(QImage::Format_RGBA8888);
+
+            // BLP JPEG payloads are typically BGR; match RMS/War3BatchPreview swap.
+            img = img.rgbSwapped();
 
             *outImage = img;
             return true;
