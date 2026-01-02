@@ -53,6 +53,7 @@ struct ModelData
     std::vector<ModelVertex> vertices;
     std::vector<std::uint32_t> indices; // triangle list
     std::vector<SubMesh> subMeshes;
+    std::uint32_t geosetCount = 0;
 
     std::vector<ModelTexture> textures;
     std::vector<ModelMaterial> materials;

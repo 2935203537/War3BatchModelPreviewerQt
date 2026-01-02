@@ -29,6 +29,7 @@
 #include "GLModelView.h"
 #include "MdxLoader.h"
 #include "LogSink.h"
+#include "Vfs.h"
 
 namespace
 {
@@ -92,6 +93,16 @@ MainWindow::MainWindow(QWidget* parent)
     connect(&modelWatcher_, &QFutureWatcher<ModelLoadResult>::finished,
             this, &MainWindow::onModelLoadFinished);
 
+    diskVfs_ = std::make_shared<DiskVfs>(QString());
+    mpqVfs_ = std::make_shared<MpqVfs>();
+    vfs_ = std::make_shared<CompositeVfs>();
+    vfs_->add(diskVfs_);
+    vfs_->add(mpqVfs_);
+    if (viewer_)
+        viewer_->setVfs(vfs_);
+
+    onWar3RootChanged();
+
     // Default: prompt user to pick a folder.
     statusLabel_->setText("Choose a folder containing .mdx files.");
 }
@@ -126,6 +137,16 @@ void MainWindow::buildUi()
     top->addWidget(btnExportDiag_, 0);
     top->addWidget(lblFolder_, 1);
     root->addLayout(top);
+
+    // War3 root path
+    auto* war3Row = new QHBoxLayout();
+    lblWar3Root_ = new QLabel("War3 Root:");
+    editWar3Root_ = new QLineEdit("E:\\Warcraft III Frozen Throne");
+    btnWar3Browse_ = new QPushButton("Browse...");
+    war3Row->addWidget(lblWar3Root_, 0);
+    war3Row->addWidget(editWar3Root_, 1);
+    war3Row->addWidget(btnWar3Browse_, 0);
+    root->addLayout(war3Row);
 
     // Split view: left list + right viewer
     auto* splitter = new QSplitter(Qt::Horizontal);
@@ -187,6 +208,8 @@ void MainWindow::buildUi()
     speedSlider_->setToolTip("Playback speed");
 
     statusBar()->addWidget(statusLabel_, 1);
+    mpqStatusLabel_ = new QLabel("MPQ mounted: 0");
+    statusBar()->addPermanentWidget(mpqStatusLabel_);
     statusBar()->addPermanentWidget(speedLabel_);
     statusBar()->addPermanentWidget(speedSlider_);
 
@@ -198,6 +221,15 @@ void MainWindow::buildUi()
     logView_->setLineWrapMode(QPlainTextEdit::NoWrap);
     logDock_->setWidget(logView_);
     addDockWidget(Qt::BottomDockWidgetArea, logDock_);
+
+    // Missing textures dock
+    missingDock_ = new QDockWidget("Missing Textures", this);
+    missingDock_->setAllowedAreas(Qt::BottomDockWidgetArea | Qt::TopDockWidgetArea);
+    missingView_ = new QPlainTextEdit();
+    missingView_->setReadOnly(true);
+    missingView_->setLineWrapMode(QPlainTextEdit::NoWrap);
+    missingDock_->setWidget(missingView_);
+    addDockWidget(Qt::BottomDockWidgetArea, missingDock_);
 
     // Models
     listModel_ = new QStandardItemModel(this);
@@ -218,6 +250,12 @@ void MainWindow::buildUi()
             viewer_->resetView();
     });
     connect(btnExportDiag_, &QPushButton::clicked, this, &MainWindow::exportDiagnostics);
+    connect(btnWar3Browse_, &QPushButton::clicked, this, [this](){
+        const QString folder = QFileDialog::getExistingDirectory(this, "Choose Warcraft III Root", editWar3Root_->text());
+        if (!folder.isEmpty())
+            editWar3Root_->setText(folder);
+    });
+    connect(editWar3Root_, &QLineEdit::editingFinished, this, &MainWindow::onWar3RootChanged);
     connect(editFilter_, &QLineEdit::textChanged, this, &MainWindow::onFilterTextChanged);
 
     connect(list_->selectionModel(), &QItemSelectionModel::currentChanged,
@@ -225,6 +263,11 @@ void MainWindow::buildUi()
 
     connect(viewer_, &GLModelView::statusTextChanged, this, [this](const QString& t){
         statusLabel_->setText(t);
+    });
+    connect(viewer_, &GLModelView::missingTexturesChanged, this, [this](const QStringList& list){
+        if (!missingView_)
+            return;
+        missingView_->setPlainText(list.join("\n\n"));
     });
     connect(&LogSink::instance(), &LogSink::messageAdded, this, [this](const QString& line){
         if (logView_)
@@ -252,6 +295,8 @@ void MainWindow::startScanFolder(const QString& folder)
 {
     currentFolder_ = folder;
     viewer_->setAssetRoot(currentFolder_);
+    if (diskVfs_)
+        diskVfs_->setRootPath(currentFolder_);
     lblFolder_->setText(folder);
     statusLabel_->setText("Scanning for .mdx files...");
 
@@ -324,6 +369,28 @@ void MainWindow::onModelLoadFinished()
                                 .arg(result.path)
                                 .arg(shared->vertices.size())
                                 .arg(shared->indices.size() / 3));
+}
+
+void MainWindow::onWar3RootChanged()
+{
+    const QString root = editWar3Root_ ? editWar3Root_->text().trimmed() : QString();
+    if (!mpqVfs_)
+        return;
+
+    if (!QDir(root).exists())
+    {
+        if (mpqStatusLabel_)
+            mpqStatusLabel_->setText("MPQ mounted: 0");
+        LogSink::instance().log(QString("War3 root not found: %1").arg(root));
+        return;
+    }
+
+    const bool mounted = mpqVfs_->mountWar3Root(root);
+    const int count = mpqVfs_->mountedCount();
+    if (mpqStatusLabel_)
+        mpqStatusLabel_->setText(QString("MPQ mounted: %1").arg(count));
+    if (!mounted)
+        LogSink::instance().log(QString("No MPQ archives mounted from: %1").arg(root));
 }
 
 void MainWindow::exportDiagnostics()

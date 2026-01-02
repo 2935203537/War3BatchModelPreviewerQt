@@ -2,12 +2,14 @@
 
 #include <QMouseEvent>
 #include <QWheelEvent>
+#include <QKeyEvent>
 #include <QFileInfo>
 #include <QDir>
 #include <QDirIterator>
 #include <QImage>
 #include <QOpenGLContext>
 #include <QQuaternion>
+#include <QVector4D>
 
 #include <algorithm>
 #include <cmath>
@@ -16,6 +18,7 @@
 
 #include "BlpLoader.h"
 #include "LogSink.h"
+#include "Vfs.h"
 
 namespace
 {
@@ -141,12 +144,88 @@ void GLModelView::setAssetRoot(const QString& assetRoot)
     assetRoot_ = assetRoot;
 }
 
+void GLModelView::setVfs(const std::shared_ptr<IVfs>& vfs)
+{
+    vfs_ = vfs;
+}
+
 void GLModelView::resetView()
 {
     yaw_ = 30.0f;
     pitch_ = -25.0f;
-    distance_ = clampf(modelRadius_ * 2.5f, 1.0f, 250.0f);
+    distance_ = std::max(1.0f, modelRadius_ * 2.2f);
+    updateProjection(viewportW_, viewportH_);
     update();
+}
+
+void GLModelView::computeModelBounds()
+{
+    if (model_ && !model_->vertices.empty())
+    {
+        boundsMin_ = QVector3D(model_->vertices[0].px, model_->vertices[0].py, model_->vertices[0].pz);
+        boundsMax_ = boundsMin_;
+        for (const auto& v : model_->vertices)
+        {
+            boundsMin_.setX(std::min(boundsMin_.x(), v.px));
+            boundsMin_.setY(std::min(boundsMin_.y(), v.py));
+            boundsMin_.setZ(std::min(boundsMin_.z(), v.pz));
+            boundsMax_.setX(std::max(boundsMax_.x(), v.px));
+            boundsMax_.setY(std::max(boundsMax_.y(), v.py));
+            boundsMax_.setZ(std::max(boundsMax_.z(), v.pz));
+        }
+    }
+    else if (model_ && !model_->pivots.empty())
+    {
+        boundsMin_ = QVector3D(model_->pivots[0].x, model_->pivots[0].y, model_->pivots[0].z);
+        boundsMax_ = boundsMin_;
+        for (const auto& p : model_->pivots)
+        {
+            boundsMin_.setX(std::min(boundsMin_.x(), p.x));
+            boundsMin_.setY(std::min(boundsMin_.y(), p.y));
+            boundsMin_.setZ(std::min(boundsMin_.z(), p.z));
+            boundsMax_.setX(std::max(boundsMax_.x(), p.x));
+            boundsMax_.setY(std::max(boundsMax_.y(), p.y));
+            boundsMax_.setZ(std::max(boundsMax_.z(), p.z));
+        }
+    }
+    else
+    {
+        boundsMin_ = QVector3D(-1.0f, -1.0f, -1.0f);
+        boundsMax_ = QVector3D(1.0f, 1.0f, 1.0f);
+    }
+
+    modelCenter_ = (boundsMin_ + boundsMax_) * 0.5f;
+    const QVector3D ext = (boundsMax_ - boundsMin_) * 0.5f;
+    boundsRadius_ = std::max(0.25f, ext.length());
+    modelRadius_ = boundsRadius_;
+    buildDebugGeometry();
+}
+
+void GLModelView::updateProjection(int w, int h)
+{
+    viewportW_ = std::max(w, 1);
+    viewportH_ = std::max(h, 1);
+    const float aspect = float(viewportW_) / float(viewportH_);
+    near_ = std::max(0.05f, modelRadius_ / 5000.0f);
+    far_ = std::max(2000.0f, distance_ + modelRadius_ * 10.0f);
+    proj_.setToIdentity();
+    proj_.perspective(45.0f, aspect, near_, far_);
+}
+
+void GLModelView::recordMissingTexture(const QString& ref, const QStringList& attempts)
+{
+    QString entry = ref;
+    if (!attempts.isEmpty())
+    {
+        entry += "\n  tried:";
+        for (const auto& a : attempts)
+            entry += "\n    " + a;
+    }
+    if (missingTextureSet_.contains(entry))
+        return;
+    missingTextureSet_.insert(entry);
+    missingTextures_.append(entry);
+    emit missingTexturesChanged(missingTextures_);
 }
 
 void GLModelView::setModel(std::optional<ModelData> model, const QString& displayName, const QString& filePath)
@@ -156,9 +235,17 @@ void GLModelView::setModel(std::optional<ModelData> model, const QString& displa
     modelDir_ = filePath.isEmpty() ? QString() : QFileInfo(filePath).absolutePath();
     model_ = std::move(model);
 
+    missingTextures_.clear();
+    missingTextureSet_.clear();
+    emit missingTexturesChanged(missingTextures_);
+
     localTimeMs_ = 0;
     currentSeq_ = 0;
     frameTimer_.restart();
+    fpsFrames_ = 0;
+    fps_ = 0.0f;
+    fpsTimer_.invalidate();
+    loggedBlank_ = false;
 
     runtimeEmitters2_.clear();
     if (model_)
@@ -180,29 +267,13 @@ void GLModelView::setModel(std::optional<ModelData> model, const QString& displa
         doneCurrent();
     }
 
-    // Frame model if we have bounds, otherwise fall back.
-    if (model_ && model_->hasBounds)
-    {
-        const auto& m = *model_;
-        modelCenter_ = QVector3D(
-            (m.boundsMin[0] + m.boundsMax[0]) * 0.5f,
-            (m.boundsMin[1] + m.boundsMax[1]) * 0.5f,
-            (m.boundsMin[2] + m.boundsMax[2]) * 0.5f
-        );
-        const QVector3D ext(
-            (m.boundsMax[0] - m.boundsMin[0]) * 0.5f,
-            (m.boundsMax[1] - m.boundsMin[1]) * 0.5f,
-            (m.boundsMax[2] - m.boundsMin[2]) * 0.5f
-        );
-        modelRadius_ = std::max(0.25f, ext.length());
-    }
-    else
-    {
-        modelCenter_ = QVector3D(0, 0, 0);
-        modelRadius_ = 1.0f;
-    }
-
+    computeModelBounds();
     resetView();
+    LogSink::instance().log(QString("Camera fit: target=%1,%2,%3 dist=%4 near=%5 far=%6")
+                                .arg(modelCenter_.x()).arg(modelCenter_.y()).arg(modelCenter_.z())
+                                .arg(distance_)
+                                .arg(near_)
+                                .arg(far_));
 
     QString seqInfo = "<no SEQS>";
     if (model_ && !model_->sequences.empty())
@@ -257,11 +328,11 @@ void GLModelView::initializeGL()
     // so models show up reliably.
     glDisable(GL_CULL_FACE);
 
-    const bool isGles = QOpenGLContext::currentContext()
+    isGles_ = QOpenGLContext::currentContext()
                             ? QOpenGLContext::currentContext()->isOpenGLES()
                             : false;
-    const QString glslHeader = isGles ? "#version 300 es\n" : "#version 330 core\n";
-    const QString glslFragPreamble = isGles ? "precision mediump float;\n" : "";
+    const QString glslHeader = isGles_ ? "#version 300 es\n" : "#version 330 core\n";
+    const QString glslFragPreamble = isGles_ ? "precision mediump float;\n" : "";
 
     // Mesh shader: textured + lambert, with optional alpha test.
     program_.addShaderFromSourceCode(QOpenGLShader::Vertex, QString(R"GLSL(
@@ -326,6 +397,10 @@ void GLModelView::initializeGL()
         emit statusTextChanged("Mesh shader link failed: " + program_.log());
         LogSink::instance().log("Mesh shader link failed: " + program_.log());
     }
+    else if (!program_.log().isEmpty())
+    {
+        LogSink::instance().log("Mesh shader log: " + program_.log());
+    }
 
     // Particle shader (unlit)
     particleProgram_.addShaderFromSourceCode(QOpenGLShader::Vertex, QString(R"GLSL(
@@ -372,6 +447,41 @@ void GLModelView::initializeGL()
         emit statusTextChanged("Particle shader link failed: " + particleProgram_.log());
         LogSink::instance().log("Particle shader link failed: " + particleProgram_.log());
     }
+    else if (!particleProgram_.log().isEmpty())
+    {
+        LogSink::instance().log("Particle shader log: " + particleProgram_.log());
+    }
+
+    debugProgram_.addShaderFromSourceCode(QOpenGLShader::Vertex, QString(R"GLSL(
+        %1
+        layout(location=0) in vec3 aPos;
+        layout(location=1) in vec4 aColor;
+
+        uniform mat4 uMVP;
+
+        out vec4 vColor;
+
+        void main(){
+            gl_Position = uMVP * vec4(aPos, 1.0);
+            vColor = aColor;
+        }
+    )GLSL").arg(glslHeader));
+
+    debugProgram_.addShaderFromSourceCode(QOpenGLShader::Fragment, QString(R"GLSL(
+        %1
+        %2
+        in vec4 vColor;
+        out vec4 FragColor;
+        void main(){
+            FragColor = vColor;
+        }
+    )GLSL").arg(glslHeader, glslFragPreamble));
+
+    debugProgramReady_ = debugProgram_.link();
+    if (!debugProgramReady_)
+        LogSink::instance().log("Debug shader link failed: " + debugProgram_.log());
+    else if (!debugProgram_.log().isEmpty())
+        LogSink::instance().log("Debug shader log: " + debugProgram_.log());
 
     // Particle buffer
     glGenVertexArrays(1, &pVao_);
@@ -389,13 +499,26 @@ void GLModelView::initializeGL()
 
     glBindVertexArray(0);
 
+    // Debug buffer
+    glGenVertexArrays(1, &debugVao_);
+    glBindVertexArray(debugVao_);
+    glGenBuffers(1, &debugVbo_);
+    glBindBuffer(GL_ARRAY_BUFFER, debugVbo_);
+    glBufferData(GL_ARRAY_BUFFER, 0, nullptr, GL_DYNAMIC_DRAW);
+
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(DebugVertex), (void*)offsetof(DebugVertex, px));
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 4, GL_FLOAT, GL_FALSE, sizeof(DebugVertex), (void*)offsetof(DebugVertex, r));
+
+    glBindVertexArray(0);
+
     rebuildGpuBuffers();
 }
 
 void GLModelView::resizeGL(int w, int h)
 {
-    proj_.setToIdentity();
-    proj_.perspective(45.0f, float(w) / float(std::max(h, 1)), 0.01f, 2000.0f);
+    updateProjection(w, h);
 }
 
 void GLModelView::tickAnimation()
@@ -528,12 +651,116 @@ void GLModelView::updateEmitters(float dtSeconds)
     }
 }
 
+void GLModelView::buildDebugGeometry()
+{
+    debugVerts_.clear();
+
+    const float axisLen = std::max(1.0f, boundsRadius_ * 0.75f);
+    const QVector3D o = modelCenter_;
+
+    auto pushLine = [&](const QVector3D& a, const QVector3D& b, const QVector4D& c)
+    {
+        DebugVertex v0{a.x(), a.y(), a.z(), c.x(), c.y(), c.z(), c.w()};
+        DebugVertex v1{b.x(), b.y(), b.z(), c.x(), c.y(), c.z(), c.w()};
+        debugVerts_.push_back(v0);
+        debugVerts_.push_back(v1);
+    };
+
+    // Axes
+    pushLine(o, o + QVector3D(axisLen, 0, 0), QVector4D(1, 0, 0, 1));
+    pushLine(o, o + QVector3D(0, axisLen, 0), QVector4D(0, 1, 0, 1));
+    pushLine(o, o + QVector3D(0, 0, axisLen), QVector4D(0, 0, 1, 1));
+
+    // AABB edges
+    const QVector3D mn = boundsMin_;
+    const QVector3D mx = boundsMax_;
+    const QVector3D c(0.9f, 0.9f, 0.2f);
+    const QVector4D col(c.x(), c.y(), c.z(), 1.0f);
+
+    QVector3D v[8] = {
+        {mn.x(), mn.y(), mn.z()},
+        {mx.x(), mn.y(), mn.z()},
+        {mx.x(), mx.y(), mn.z()},
+        {mn.x(), mx.y(), mn.z()},
+        {mn.x(), mn.y(), mx.z()},
+        {mx.x(), mn.y(), mx.z()},
+        {mx.x(), mx.y(), mx.z()},
+        {mn.x(), mx.y(), mx.z()}
+    };
+
+    const int e[12][2] = {
+        {0,1},{1,2},{2,3},{3,0},
+        {4,5},{5,6},{6,7},{7,4},
+        {0,4},{1,5},{2,6},{3,7}
+    };
+    for (const auto& edge : e)
+        pushLine(v[edge[0]], v[edge[1]], col);
+}
+
+void GLModelView::drawDebug(const QMatrix4x4& mvp)
+{
+    if (!debugProgramReady_ || debugVao_ == 0 || debugVerts_.empty())
+        return;
+
+    debugProgram_.bind();
+    debugProgram_.setUniformValue("uMVP", mvp);
+
+    glBindVertexArray(debugVao_);
+    glBindBuffer(GL_ARRAY_BUFFER, debugVbo_);
+    glBufferData(GL_ARRAY_BUFFER,
+                 GLsizeiptr(debugVerts_.size() * sizeof(DebugVertex)),
+                 debugVerts_.data(),
+                 GL_DYNAMIC_DRAW);
+
+    glDisable(GL_DEPTH_TEST);
+    glLineWidth(1.5f);
+    glDrawArrays(GL_LINES, 0, GLsizei(debugVerts_.size()));
+    lastDrawCalls_ += 1;
+    glLineWidth(1.0f);
+    glEnable(GL_DEPTH_TEST);
+
+    glBindVertexArray(0);
+    debugProgram_.release();
+}
+
+void GLModelView::updateStatusText()
+{
+    if (statusTimer_.isValid() && statusTimer_.elapsed() < 250)
+        return;
+    if (!statusTimer_.isValid())
+        statusTimer_.start();
+    else
+        statusTimer_.restart();
+
+    const std::size_t verts = model_ ? model_->vertices.size() : 0;
+    const std::size_t tris = model_ ? (model_->indices.size() / 3) : 0;
+    const std::size_t geosets = model_ ? (model_->geosetCount != 0 ? model_->geosetCount : model_->subMeshes.size()) : 0;
+    const std::size_t materials = model_ ? model_->materials.size() : 0;
+    const std::size_t textures = model_ ? model_->textures.size() : 0;
+
+    QString extra;
+    if (model_ && verts == 0)
+        extra = model_->emitters2.empty() ? " | empty mesh" : " | particle-only";
+
+    emit statusTextChanged(QString("%1 | v:%2 t:%3 g:%4 m:%5 tex:%6 dc:%7 fps:%8%9")
+                               .arg(displayName_)
+                               .arg(verts)
+                               .arg(tris)
+                               .arg(geosets)
+                               .arg(materials)
+                               .arg(textures)
+                               .arg(lastDrawCalls_)
+                               .arg(QString::number(fps_, 'f', 1))
+                               .arg(extra));
+}
+
 void GLModelView::paintGL()
 {
     glViewport(0, 0, width(), height());
-    glClearColor(0.10f, 0.10f, 0.12f, 1.0f);
+    glClearColor(0.15f, 0.15f, 0.15f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
+    lastDrawCalls_ = 0;
     if (!model_)
         return;
 
@@ -554,11 +781,16 @@ void GLModelView::paintGL()
     // --- Draw mesh (if any)
     if (programReady_ && vao_ != 0 && !model_->indices.empty())
     {
+        if (wireframe_ && !isGles_)
+            glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
+
         program_.bind();
         program_.setUniformValue("uMVP", mvp);
         program_.setUniformValue("uNormalMat", normalMat);
 
         glBindVertexArray(vao_);
+
+        glDisable(GL_CULL_FACE);
 
         // Pass 1: opaque + alpha-tested (depth write on)
         glDepthMask(GL_TRUE);
@@ -574,19 +806,16 @@ void GLModelView::paintGL()
             const auto& layer = mat.layer;
 
             const bool unshaded = (layer.shadingFlags & LAYER_UNSHADED) != 0;
-            const bool twoSided = (layer.shadingFlags & LAYER_TWOSIDED) != 0;
             const bool noDepthTest = (layer.shadingFlags & LAYER_NODEPTH) != 0;
             const bool noDepthSet  = (layer.shadingFlags & LAYER_NODEPTHSET) != 0;
 
             const std::uint32_t filter = layer.filterMode;
 
-            const bool alphaTest = (filter == 1);                 // Transparent
+            const bool alphaTest = alphaTestEnabled_ && (filter == 1);
             const bool blended   = (filter == 2 || filter == 3 || filter == 4 || filter == 5 || filter == 6);
 
             if (transparentPass != blended)
                 return;
-
-            if (twoSided) glDisable(GL_CULL_FACE); else glEnable(GL_CULL_FACE);
 
             if (noDepthTest) glDisable(GL_DEPTH_TEST); else glEnable(GL_DEPTH_TEST);
             glDepthMask(noDepthSet ? GL_FALSE : GL_TRUE);
@@ -635,6 +864,7 @@ void GLModelView::paintGL()
                 GL_UNSIGNED_INT,
                 (void*)(uintptr_t(sm.indexOffset * sizeof(std::uint32_t)))
             );
+            lastDrawCalls_ += 1;
         };
 
         for (const auto& sm : gpuSubmeshes_)
@@ -655,6 +885,9 @@ void GLModelView::paintGL()
 
         glBindVertexArray(0);
         program_.release();
+
+        if (wireframe_ && !isGles_)
+            glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
 
         // Reset to a known baseline before other passes.
         glDisable(GL_BLEND);
@@ -700,16 +933,14 @@ void GLModelView::paintGL()
             // Blend mode (match WC3 as closely as reasonable)
             const std::uint32_t f = e.filterMode;
             const bool alphaKey = (f == 4); // AlphaKey
+            particleProgram_.setUniformValue("uAlphaTest", 0);
+            particleProgram_.setUniformValue("uAlphaCutoff", 0.0f);
             if (alphaKey)
             {
-                particleProgram_.setUniformValue("uAlphaTest", 1);
-                particleProgram_.setUniformValue("uAlphaCutoff", 0.75f);
                 glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
             }
             else
             {
-                particleProgram_.setUniformValue("uAlphaTest", 0);
-                particleProgram_.setUniformValue("uAlphaCutoff", 0.0f);
                 switch (f)
                 {
                 case 1: // Additive
@@ -859,6 +1090,7 @@ void GLModelView::paintGL()
                          GL_DYNAMIC_DRAW);
 
             glDrawArrays(GL_TRIANGLES, 0, GLsizei(particleVerts_.size()));
+            lastDrawCalls_ += 1;
         }
 
         glBindVertexArray(0);
@@ -869,6 +1101,35 @@ void GLModelView::paintGL()
         glDisable(GL_CULL_FACE);
         particleProgram_.release();
     }
+
+    drawDebug(mvp);
+
+    if (!fpsTimer_.isValid())
+        fpsTimer_.start();
+    fpsFrames_ += 1;
+    const qint64 fpsElapsed = fpsTimer_.elapsed();
+    if (fpsElapsed >= 1000)
+    {
+        fps_ = float(fpsFrames_) * 1000.0f / float(fpsElapsed);
+        fpsFrames_ = 0;
+        fpsTimer_.restart();
+    }
+
+    if (model_ && !model_->vertices.empty() && lastDrawCalls_ == 0 && !loggedBlank_)
+    {
+        LogSink::instance().log(QString("Blank draw: target=%1,%2,%3 dist=%4 near=%5 far=%6 drawCalls=%7 alphaTest=%8 cull=%9 blend=%10")
+                                    .arg(modelCenter_.x()).arg(modelCenter_.y()).arg(modelCenter_.z())
+                                    .arg(distance_)
+                                    .arg(near_)
+                                    .arg(far_)
+                                    .arg(lastDrawCalls_)
+                                    .arg(alphaTestEnabled_ ? "on" : "off")
+                                    .arg("off")
+                                    .arg("per-material"));
+        loggedBlank_ = true;
+    }
+
+    updateStatusText();
 }
 
 void GLModelView::mousePressEvent(QMouseEvent* e)
@@ -894,8 +1155,36 @@ void GLModelView::wheelEvent(QWheelEvent* e)
 {
     const float num = e->angleDelta().y() / 120.0f;
     distance_ *= std::pow(0.90f, num);
-    distance_ = clampf(distance_, 0.25f, 2000.0f);
+    distance_ = clampf(distance_, 0.25f, 10000.0f);
+    updateProjection(viewportW_, viewportH_);
     update();
+}
+
+void GLModelView::keyPressEvent(QKeyEvent* e)
+{
+    if (e->key() == Qt::Key_F)
+    {
+        resetView();
+        e->accept();
+        return;
+    }
+    if (e->key() == Qt::Key_W)
+    {
+        wireframe_ = !wireframe_;
+        LogSink::instance().log(QString("Wireframe: %1").arg(wireframe_ ? "on" : "off"));
+        update();
+        e->accept();
+        return;
+    }
+    if (e->key() == Qt::Key_A)
+    {
+        alphaTestEnabled_ = !alphaTestEnabled_;
+        LogSink::instance().log(QString("Alpha test: %1").arg(alphaTestEnabled_ ? "on" : "off"));
+        update();
+        e->accept();
+        return;
+    }
+    QOpenGLWidget::keyPressEvent(e);
 }
 
 void GLModelView::clearGpuResources()
@@ -913,6 +1202,8 @@ void GLModelView::clearGpuResources()
 
     if (pVbo_) { glDeleteBuffers(1, &pVbo_); pVbo_ = 0; }
     if (pVao_) { glDeleteVertexArrays(1, &pVao_); pVao_ = 0; }
+    if (debugVbo_) { glDeleteBuffers(1, &debugVbo_); debugVbo_ = 0; }
+    if (debugVao_) { glDeleteVertexArrays(1, &debugVao_); debugVao_ = 0; }
 
     for (auto& kv : textureCache_)
     {
@@ -1027,10 +1318,20 @@ GLModelView::TextureResolve GLModelView::resolveTexturePath(const std::string& m
     if (p.isEmpty()) return res;
 
     p = normPath(p);
+    const QString lower = p.toLower();
+    if (lower.startsWith("war3mapimported/"))
+        p = p.mid(QString("war3mapimported/").length());
+
+    auto addRelCandidate = [&](const QString& rel)
+    {
+        if (!rel.isEmpty() && !res.vfsCandidates.contains(rel))
+            res.vfsCandidates.append(rel);
+    };
 
     auto tryPath = [&](const QString& base, const QString& rel, const QString& source) -> bool
     {
         const QString candidate = QDir(base).filePath(rel);
+        res.attempts.append(candidate);
         if (QFileInfo::exists(candidate))
         {
             res.path = candidate;
@@ -1041,6 +1342,10 @@ GLModelView::TextureResolve GLModelView::resolveTexturePath(const std::string& m
     };
 
     // Absolute path?
+    if (QFileInfo(p).isAbsolute())
+    {
+        res.attempts.append(p);
+    }
     if (QFileInfo(p).isAbsolute() && QFileInfo::exists(p))
     {
         res.path = p;
@@ -1061,7 +1366,12 @@ GLModelView::TextureResolve GLModelView::resolveTexturePath(const std::string& m
             return res;
     }
 
-    // 2) Common Warcraft III folders (within asset root)
+    // 2) Asset root original path
+    if (tryPath(assetRoot_, p, "asset-root"))
+        return res;
+    addRelCandidate(p);
+
+    // 3) Common Warcraft III folders (within asset root)
     const QStringList commonDirs = {
         "Textures",
         "ReplaceableTextures/TeamColor",
@@ -1082,23 +1392,24 @@ GLModelView::TextureResolve GLModelView::resolveTexturePath(const std::string& m
             return res;
         if (tryPath(assetRoot_, dir + "/" + p, "common:" + dir))
             return res;
+        addRelCandidate(dir + "/" + baseName);
+        addRelCandidate(dir + "/" + p);
     }
 
-    // 3) war3mapImported folder
+    // 4) war3mapImported folder
     if (tryPath(assetRoot_, "war3mapImported/" + baseName, "war3mapImported"))
         return res;
     if (tryPath(assetRoot_, "war3mapImported/" + p, "war3mapImported"))
         return res;
-
-    // 4) Direct path under asset root
-    if (tryPath(assetRoot_, p, "asset-root"))
-        return res;
+    addRelCandidate("war3mapImported/" + baseName);
+    addRelCandidate("war3mapImported/" + p);
 
     // 5) Basename search (first hit)
     QDirIterator it(assetRoot_, QStringList() << baseName, QDir::Files, QDirIterator::Subdirectories);
     if (it.hasNext())
     {
         res.path = it.next();
+        res.attempts.append(res.path);
         res.source = "basename-search";
         return res;
     }
@@ -1190,6 +1501,7 @@ GLuint GLModelView::getOrCreateTexture(std::uint32_t textureId)
         if (!tex.fileName.empty())
         {
             const auto resolved = resolveTexturePath(tex.fileName);
+            QStringList attempts = resolved.attempts;
             if (!resolved.path.isEmpty())
             {
                 QImage img;
@@ -1242,6 +1554,74 @@ GLuint GLModelView::getOrCreateTexture(std::uint32_t textureId)
                                                 .arg(textureId)
                                                 .arg(resolved.path)
                                                 .arg(err));
+                    recordMissingTexture(QString::fromStdString(tex.fileName), attempts);
+                }
+            }
+            else if (vfs_)
+            {
+                QImage img;
+                QString err;
+                bool ok = false;
+                QString source;
+                QString foundPath;
+
+                for (const auto& candidate : resolved.vfsCandidates)
+                {
+                    const QString attempt = QString("mpq:%1").arg(candidate);
+                    attempts.append(attempt);
+
+                    const QByteArray bytes = vfs_->readAll(candidate);
+                    if (bytes.isEmpty())
+                        continue;
+
+                    source = vfs_->resolveDebugInfo(candidate);
+                    foundPath = candidate;
+                    const QString ext = QFileInfo(candidate).suffix().toLower();
+                    if (ext == "blp" || ext.isEmpty())
+                        ok = BlpLoader::LoadBlpToImageFromBytes(bytes, &img, &err);
+                    else
+                    {
+                        ok = img.loadFromData(bytes);
+                        if (!ok) err = "Qt failed to load image bytes.";
+                        if (ok && img.format() != QImage::Format_RGBA8888)
+                            img = img.convertToFormat(QImage::Format_RGBA8888);
+                    }
+                    if (ok)
+                        break;
+                }
+
+                if (ok && !img.isNull())
+                {
+                    img = img.flipped(Qt::Vertical);
+
+                    GLuint gltex = 0;
+                    glGenTextures(1, &gltex);
+                    glBindTexture(GL_TEXTURE_2D, gltex);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+
+                    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, img.width(), img.height(), 0,
+                                 GL_RGBA, GL_UNSIGNED_BYTE, img.constBits());
+                    glGenerateMipmap(GL_TEXTURE_2D);
+
+                    glBindTexture(GL_TEXTURE_2D, 0);
+
+                    handle.id = gltex;
+                    handle.path = foundPath;
+                    handle.source = source.isEmpty() ? "mpq" : source;
+                    LogSink::instance().log(QString("Texture %1 hit %2 -> %3")
+                                                .arg(textureId)
+                                                .arg(handle.source)
+                                                .arg(handle.path));
+                }
+                else
+                {
+                    LogSink::instance().log(QString("Texture %1 not found in MPQ: %2")
+                                                .arg(textureId)
+                                                .arg(QString::fromStdString(tex.fileName)));
+                    recordMissingTexture(QString::fromStdString(tex.fileName), attempts);
                 }
             }
             else
@@ -1249,6 +1629,7 @@ GLuint GLModelView::getOrCreateTexture(std::uint32_t textureId)
                 LogSink::instance().log(QString("Texture %1 not found: %2")
                                             .arg(textureId)
                                             .arg(QString::fromStdString(tex.fileName)));
+                recordMissingTexture(QString::fromStdString(tex.fileName), attempts);
             }
         }
     }

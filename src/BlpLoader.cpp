@@ -88,7 +88,7 @@ namespace
 
 namespace BlpLoader
 {
-    bool LoadBlpToImage(const QString& filePath, QImage* outImage, QString* outError)
+    static bool LoadFromBytesInternal(const QByteArray& bytes, QImage* outImage, QString* outError)
     {
         if (!outImage)
         {
@@ -96,14 +96,6 @@ namespace BlpLoader
             return false;
         }
 
-        QFile f(filePath);
-        if (!f.open(QIODevice::ReadOnly))
-        {
-            setErr(outError, QString("Failed to open: %1").arg(filePath));
-            return false;
-        }
-
-        const QByteArray bytes = f.readAll();
         if (bytes.size() < 8)
         {
             setErr(outError, "File too small.");
@@ -340,6 +332,18 @@ namespace BlpLoader
         }
     }
 
+    bool LoadBlpToImage(const QString& filePath, QImage* outImage, QString* outError)
+    {
+        QFile f(filePath);
+        if (!f.open(QIODevice::ReadOnly))
+        {
+            setErr(outError, QString("Failed to open: %1").arg(filePath));
+            return false;
+        }
+        const QByteArray bytes = f.readAll();
+        return LoadFromBytesInternal(bytes, outImage, outError);
+    }
+
     bool LoadBlpToImageCached(const QString& filePath, QImage* outImage, QString* outError)
     {
         if (!outImage)
@@ -375,5 +379,10 @@ namespace BlpLoader
         }
         *outImage = img;
         return true;
+    }
+
+    bool LoadBlpToImageFromBytes(const QByteArray& bytes, QImage* outImage, QString* outError)
+    {
+        return LoadFromBytesInternal(bytes, outImage, outError);
     }
 }

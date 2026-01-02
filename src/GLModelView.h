@@ -10,6 +10,8 @@
 #include <QTimer>
 #include <QElapsedTimer>
 #include <QHash>
+#include <QSet>
+#include <memory>
 #include <optional>
 #include <unordered_map>
 
@@ -24,6 +26,7 @@ public:
 
     void setModel(std::optional<ModelData> model, const QString& displayName, const QString& filePath);
     void setAssetRoot(const QString& assetRoot);
+    void setVfs(const std::shared_ptr<class IVfs>& vfs);
     void resetView();
 
     // Animation / playback
@@ -32,6 +35,7 @@ public:
 
 signals:
     void statusTextChanged(const QString& text);
+    void missingTexturesChanged(const QStringList& missing);
 
 protected:
     void initializeGL() override;
@@ -41,16 +45,25 @@ protected:
     void mousePressEvent(QMouseEvent* e) override;
     void mouseMoveEvent(QMouseEvent* e) override;
     void wheelEvent(QWheelEvent* e) override;
+    void keyPressEvent(QKeyEvent* e) override;
 
 private:
     void rebuildGpuBuffers();
     void clearGpuResources();
+    void computeModelBounds();
+    void buildDebugGeometry();
+    void updateProjection(int w, int h);
+    void updateStatusText();
+    void recordMissingTexture(const QString& ref, const QStringList& attempts);
+    void drawDebug(const QMatrix4x4& mvp);
 
     GLuint getOrCreateTexture(std::uint32_t textureId);
     struct TextureResolve
     {
         QString path;
         QString source;
+        QStringList attempts;
+        QStringList vfsCandidates;
     };
     TextureResolve resolveTexturePath(const std::string& mdxPath) const;
     GLuint createPlaceholderTexture();
@@ -83,6 +96,7 @@ private:
     QString modelPath_;
     QString modelDir_;
     QString assetRoot_;
+    std::shared_ptr<class IVfs> vfs_;
 
     // GPU resources
     GLuint vao_ = 0;
@@ -95,24 +109,46 @@ private:
     bool programReady_ = false;
     QOpenGLDebugLogger glLogger_;
     bool glLoggerReady_ = false;
+    QOpenGLShaderProgram debugProgram_;
+    bool debugProgramReady_ = false;
+    GLuint debugVao_ = 0;
+    GLuint debugVbo_ = 0;
+    struct DebugVertex
+    {
+        float px, py, pz;
+        float r, g, b, a;
+    };
+    std::vector<DebugVertex> debugVerts_;
 
     std::unordered_map<std::uint32_t, TextureHandle> textureCache_;
     GLuint placeholderTex_ = 0;
     GLuint teamColorTex_ = 0;
     GLuint teamGlowTex_ = 0;
+    QStringList missingTextures_;
+    QSet<QString> missingTextureSet_;
 
     // Camera controls
     QPoint lastMouse_;
     float yaw_ = 30.0f;
     float pitch_ = -25.0f;
     float distance_ = 6.0f;
+    float near_ = 0.05f;
+    float far_ = 2000.0f;
+    bool wireframe_ = false;
+    bool alphaTestEnabled_ = false;
+    bool isGles_ = false;
 
     // Model framing
     QVector3D modelCenter_{0,0,0};
     float modelRadius_ = 1.0f;
+    QVector3D boundsMin_{0,0,0};
+    QVector3D boundsMax_{0,0,0};
+    float boundsRadius_ = 1.0f;
 
     // Cached matrices
     QMatrix4x4 proj_;
+    int viewportW_ = 1;
+    int viewportH_ = 1;
 
     // ---- Animation state ----
     float playbackSpeed_ = 1.0f;
@@ -121,6 +157,12 @@ private:
 
     QTimer frameTick_;
     QElapsedTimer frameTimer_;
+    QElapsedTimer fpsTimer_;
+    int fpsFrames_ = 0;
+    float fps_ = 0.0f;
+    QElapsedTimer statusTimer_;
+    int lastDrawCalls_ = 0;
+    bool loggedBlank_ = false;
 
     void tickAnimation();
     void updateEmitters(float dtSeconds);

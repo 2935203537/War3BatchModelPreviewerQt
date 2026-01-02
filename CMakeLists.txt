@@ -14,6 +14,20 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(QT6_MIN_VERSION 6.2)
 set(QT5_MIN_VERSION 5.15)
 
+# MPQ support via StormLib
+include(FetchContent)
+set(STORMLIB_BUILD_SHARED OFF CACHE BOOL "" FORCE)
+set(STORMLIB_BUILD_STATIC ON CACHE BOOL "" FORCE)
+FetchContent_Declare(
+  stormlib
+  GIT_REPOSITORY https://github.com/ladislav-zezula/StormLib.git
+  GIT_TAG        master
+)
+FetchContent_MakeAvailable(stormlib)
+if (TARGET storm)
+  target_compile_definitions(storm PRIVATE __STORMLIB_SELF__ __STORMLIB_NO_STATIC_LINK__)
+endif()
+
 # Tip for Visual Studio CMake: pass -DQT6_ROOT=... or set Qt6_DIR/CMAKE_PREFIX_PATH
 if(DEFINED QT6_ROOT)
   list(PREPEND CMAKE_PREFIX_PATH "${QT6_ROOT}")
@@ -39,6 +53,8 @@ set(SOURCES
     src/BlpLoader.h
     src/LogSink.cpp
     src/LogSink.h
+    src/Vfs.cpp
+    src/Vfs.h
 )
 
 if (USE_QT5)
@@ -51,10 +67,21 @@ else()
   qt_add_executable(War3BatchModelPreviewerQt ${SOURCES})
 endif()
 
+target_compile_definitions(War3BatchModelPreviewerQt PRIVATE __STORMLIB_NO_STATIC_LINK__)
+
 if (USE_QT5)
   target_link_libraries(War3BatchModelPreviewerQt PRIVATE Qt5::Widgets Qt5::OpenGL Qt5::Concurrent)
 else()
   target_link_libraries(War3BatchModelPreviewerQt PRIVATE Qt6::Widgets Qt6::OpenGLWidgets Qt6::Concurrent)
+endif()
+
+if (TARGET storm)
+  target_link_libraries(War3BatchModelPreviewerQt PRIVATE storm)
+  target_include_directories(War3BatchModelPreviewerQt PRIVATE ${stormlib_SOURCE_DIR}/src)
+elseif (TARGET StormLib::StormLib)
+  target_link_libraries(War3BatchModelPreviewerQt PRIVATE StormLib::StormLib)
+elseif (TARGET StormLib)
+  target_link_libraries(War3BatchModelPreviewerQt PRIVATE StormLib)
 endif()
 if (MSVC)
     target_compile_options(War3BatchModelPreviewerQt PRIVATE /W4 /permissive-)

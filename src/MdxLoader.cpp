@@ -1,6 +1,7 @@
 #include "MdxLoader.h"
 
 #include <QFile>
+#include <QStringList>
 #include <QtGlobal>
 
 #include <algorithm>
@@ -10,6 +11,7 @@
 #include <string>
 #include <vector>
 
+#include "LogSink.h"
 namespace
 {
     struct Reader
@@ -860,15 +862,8 @@ namespace
 
 namespace MdxLoader
 {
-    std::optional<ModelData> LoadFromFile(const QString& filePath, QString* outError)
+    std::optional<ModelData> LoadFromBytes(const QByteArray& bytes, QString* outError)
     {
-        QFile f(filePath);
-        if (!f.open(QIODevice::ReadOnly))
-        {
-            setErr(outError, QString("Failed to open: %1").arg(filePath));
-            return std::nullopt;
-        }
-        const QByteArray bytes = f.readAll();
         if (bytes.size() < 8)
         {
             setErr(outError, "File too small.");
@@ -888,6 +883,7 @@ namespace MdxLoader
         }
 
         ModelData model;
+        QStringList chunkTags;
 
         while (r.canRead(8))
         {
@@ -899,6 +895,7 @@ namespace MdxLoader
                 break;
 
             const qsizetype chunkStart = r.pos;
+            chunkTags << QString::fromLatin1(tag, 4);
 
             // Subreader for this chunk
             Reader cr;
@@ -929,6 +926,7 @@ namespace MdxLoader
             else if (tagEq(tag, "GEOS"))
             {
                 // Parse geosets -> append vertices/indices and create submeshes
+                std::uint32_t geosetIndex = 0;
                 while (cr.canRead(4))
                 {
                     quint32 inclusiveSize = 0;
@@ -939,6 +937,12 @@ namespace MdxLoader
                     GeosetParsed gs;
                     if (!parseGeoset(cr, inclusiveSize, model.mdxVersion, gs, outError))
                         return std::nullopt;
+                    model.geosetCount += 1;
+                    LogSink::instance().log(QString("Geoset %1: verts=%2 tris=%3")
+                                                .arg(geosetIndex)
+                                                .arg(gs.vertices.size())
+                                                .arg(gs.triIndices.size() / 3));
+                    geosetIndex++;
 
                     if (gs.vertices.empty() || gs.triIndices.empty())
                         continue;
@@ -987,13 +991,11 @@ namespace MdxLoader
             r.pos = chunkStart + qsizetype(chunkSize);
         }
 
+        if (!chunkTags.isEmpty())
+            LogSink::instance().log(QString("MDX chunks: %1").arg(chunkTags.join(", ")));
+
         const bool hasMesh = !model.vertices.empty() && !model.indices.empty();
         const bool hasParticles = !model.emitters2.empty();
-        if (!hasMesh && !hasParticles)
-        {
-            setErr(outError, "No renderable data found (missing GEOS and PRE2). ");
-            return std::nullopt;
-        }
 
         // Compute bounds (mesh preferred; otherwise use pivots; otherwise a small default cube)
         {
@@ -1072,6 +1074,21 @@ namespace MdxLoader
                 sm.materialId = 0;
         }
 
+        return model;
+    }
+
+    std::optional<ModelData> LoadFromFile(const QString& filePath, QString* outError)
+    {
+        QFile f(filePath);
+        if (!f.open(QIODevice::ReadOnly))
+        {
+            setErr(outError, QString("Failed to open: %1").arg(filePath));
+            return std::nullopt;
+        }
+        const QByteArray bytes = f.readAll();
+        auto model = LoadFromBytes(bytes, outError);
+        if (!model)
+            return std::nullopt;
         return model;
     }
 }

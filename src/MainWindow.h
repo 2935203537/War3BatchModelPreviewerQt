@@ -19,6 +19,9 @@ class QDockWidget;
 class QPlainTextEdit;
 class QTabWidget;
 class GLModelView;
+class CompositeVfs;
+class DiskVfs;
+class MpqVfs;
 struct ModelLoadResult
 {
     QString path;
@@ -41,6 +44,7 @@ private slots:
     void onFilterTextChanged(const QString& text);
     void onModelLoadFinished();
     void exportDiagnostics();
+    void onWar3RootChanged();
 
 private:
     void buildUi();
@@ -55,6 +59,9 @@ private:
     QPushButton* btnFolder_ = nullptr;
     QPushButton* btnResetView_ = nullptr;
     QPushButton* btnExportDiag_ = nullptr;
+    QLabel* lblWar3Root_ = nullptr;
+    QLineEdit* editWar3Root_ = nullptr;
+    QPushButton* btnWar3Browse_ = nullptr;
     QLineEdit* editFilter_ = nullptr;
     QListView* list_ = nullptr;
     QListView* grid_ = nullptr;
@@ -62,15 +69,21 @@ private:
     QLabel* statusLabel_ = nullptr;
     QLabel* speedLabel_ = nullptr;
     QSlider* speedSlider_ = nullptr;
+    QLabel* mpqStatusLabel_ = nullptr;
     GLModelView* viewer_ = nullptr;
     QDockWidget* logDock_ = nullptr;
     QPlainTextEdit* logView_ = nullptr;
+    QDockWidget* missingDock_ = nullptr;
+    QPlainTextEdit* missingView_ = nullptr;
     QTabWidget* viewTabs_ = nullptr;
 
     // Models
     QStandardItemModel* listModel_ = nullptr;
     QSortFilterProxyModel* proxyModel_ = nullptr;
     QHash<QString, std::shared_ptr<ModelData>> modelCache_;
+    std::shared_ptr<CompositeVfs> vfs_;
+    std::shared_ptr<DiskVfs> diskVfs_;
+    std::shared_ptr<MpqVfs> mpqVfs_;
 
     // Background scan
     QFutureWatcher<QStringList> scanWatcher_;
