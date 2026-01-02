@@ -242,6 +242,10 @@ namespace
         quint32 materialId = 0;
         std::vector<std::uint8_t> vertexGroups;
         std::vector<ModelData::SkinGroup> groups;
+        std::vector<std::uint8_t> gndxRaw;
+        std::vector<std::uint32_t> mtgcRaw;
+        std::vector<std::int32_t> matsRaw;
+        std::vector<std::vector<std::int32_t>> expandedGroups;
     };
 
     static bool parseGeoset(Reader& r, quint32 inclusiveSize, quint32 mdxVersion, GeosetParsed& out, QString* outError)
@@ -362,6 +366,7 @@ namespace
             }
             out.vertexGroups[i] = std::uint8_t(v);
         }
+        out.gndxRaw = out.vertexGroups;
 
         // MTGC (matrix group sizes)
         quint32 matrixGroupCount = 0;
@@ -379,6 +384,12 @@ namespace
             groupSizes[i] = sz;
             out.groups.push_back(ModelData::SkinGroup{});
         }
+        out.mtgcRaw.assign(groupSizes.begin(), groupSizes.end());
+        if (!groupSizes.empty())
+        {
+            for (std::uint8_t vg : out.vertexGroups)
+                Q_ASSERT(vg < groupSizes.size());
+        }
 
         // MATS (matrix indices)
         quint32 matrixIndexCount = 0;
@@ -393,6 +404,7 @@ namespace
                 setErr(outError, "Unexpected EOF reading MATS.");
                 return false;
             }
+            out.matsRaw.push_back(nodeIndex);
             while (groupIndex < matrixGroupCount && remaining == 0)
             {
                 groupIndex++;
@@ -405,6 +417,20 @@ namespace
                     --remaining;
             }
         }
+
+        // Expanded groups from MTGC/MATS
+        out.expandedGroups.clear();
+        out.expandedGroups.reserve(groupSizes.size());
+        std::size_t matsOffset = 0;
+        for (quint32 sz : groupSizes)
+        {
+            std::vector<std::int32_t> group;
+            group.reserve(sz);
+            for (quint32 k = 0; k < sz && matsOffset < out.matsRaw.size(); ++k, ++matsOffset)
+                group.push_back(out.matsRaw[matsOffset]);
+            out.expandedGroups.push_back(std::move(group));
+        }
+        Q_ASSERT(matsOffset <= out.matsRaw.size());
 
         // Fixed fields
         quint32 materialId = 0, selectionFlags = 0, selectionGroup = 0;
@@ -960,6 +986,7 @@ namespace
                 r.pos = endPos;
                 return false;
             }
+            node.type = "BONE";
             qint32 geosetId = -1;
             qint32 geoAnimId = -1;
             if (!r.readI32(geosetId) || !r.readI32(geoAnimId))
@@ -988,6 +1015,7 @@ namespace
                 r.pos = endPos;
                 return false;
             }
+            node.type = "HELP";
             storeNode(model, std::move(node));
         }
         r.pos = startPos + qsizetype(chunkSize);
@@ -1019,6 +1047,7 @@ namespace
                 r.pos = objEnd;
                 continue;
             }
+            node.type = "PRE2";
 
             ModelData::ParticleEmitter2 e;
             e.name = node.name;
@@ -1098,7 +1127,7 @@ namespace
         return true;
     }
 
-    static bool parseNodeChunkObject(Reader& r, quint32 chunkSize, ModelData& model, QString* outError)
+    static bool parseNodeChunkObject(Reader& r, quint32 chunkSize, ModelData& model, QString* outError, const char* typeTag)
     {
         const qsizetype startPos = r.pos;
         const qsizetype endPos = startPos + qsizetype(chunkSize);
@@ -1118,7 +1147,11 @@ namespace
 
             ModelData::Node node;
             if (parseNodeBlock(orr, node, outError))
+            {
+                if (typeTag)
+                    node.type = typeTag;
                 storeNode(model, std::move(node));
+            }
 
             r.pos = objEnd;
         }
@@ -1211,6 +1244,13 @@ namespace MdxLoader
                                                 .arg(gs.triIndices.size() / 3));
                     geosetIndex++;
 
+                    ModelData::GeosetDiagnostics diag;
+                    diag.gndx = std::move(gs.gndxRaw);
+                    diag.mtgc = std::move(gs.mtgcRaw);
+                    diag.mats = std::move(gs.matsRaw);
+                    diag.expandedGroups = std::move(gs.expandedGroups);
+                    model.geosetDiagnostics.push_back(std::move(diag));
+
                     if (gs.vertices.empty() || gs.triIndices.empty())
                         continue;
 
@@ -1241,6 +1281,8 @@ namespace MdxLoader
                     }
 
                     // Append indices with baseVertex offset
+                    for (std::uint32_t idx : gs.triIndices)
+                        Q_ASSERT(idx < gs.vertices.size());
                     for (std::uint32_t idx : gs.triIndices)
                         model.indices.push_back(baseVertex + idx);
 
@@ -1276,7 +1318,8 @@ namespace MdxLoader
             else if (tagEq(tag, "LITE") || tagEq(tag, "ATCH") || tagEq(tag, "PREM") ||
                      tagEq(tag, "RIBB") || tagEq(tag, "EVTS") || tagEq(tag, "CLID"))
             {
-                if (!parseNodeChunkObject(cr, chunkSize, model, outError))
+                char typeStr[5] = { tag[0], tag[1], tag[2], tag[3], 0 };
+                if (!parseNodeChunkObject(cr, chunkSize, model, outError, typeStr))
                     return std::nullopt;
             }
             else if (tagEq(tag, "PIVT"))

@@ -117,6 +117,7 @@ struct ModelData
     struct Node
     {
         std::string name;
+        std::string type; // e.g. BONE/HELP/ATCH/CLID/PRE2
         std::int32_t nodeId = -1;
         std::int32_t parentId = -1;
         std::uint32_t flags = 0;
@@ -134,6 +135,15 @@ struct ModelData
     };
     std::vector<std::uint16_t> vertexGroups; // per-vertex group id (index into skinGroups)
     std::vector<SkinGroup> skinGroups;
+
+    struct GeosetDiagnostics
+    {
+        std::vector<std::uint8_t> gndx;
+        std::vector<std::uint32_t> mtgc;
+        std::vector<std::int32_t> mats;
+        std::vector<std::vector<std::int32_t>> expandedGroups;
+    };
+    std::vector<GeosetDiagnostics> geosetDiagnostics;
 
     struct ParticleEmitter2
     {

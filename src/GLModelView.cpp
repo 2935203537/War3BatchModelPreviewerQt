@@ -324,6 +324,22 @@ void GLModelView::setBackgroundAlpha(float alpha)
     update();
 }
 
+void GLModelView::setCameraAngles(float yaw, float pitch, float roll)
+{
+    yaw_ = yaw;
+    pitch_ = clampf(pitch, -89.0f, 89.0f);
+    roll_ = roll;
+    emit anglesChanged(yaw_, pitch_, roll_);
+    update();
+}
+
+void GLModelView::setCameraPan(float x, float y, float z)
+{
+    panOffset_ = QVector3D(x, y, z);
+    emit panChanged(panOffset_.x(), panOffset_.y(), panOffset_.z());
+    update();
+}
+
 void GLModelView::setAssetRoot(const QString& assetRoot)
 {
     assetRoot_ = assetRoot;
@@ -338,10 +354,13 @@ void GLModelView::resetView()
 {
     // Default to a front-facing view (War3 uses Z-up).
     yaw_ = 0.0f;
-    pitch_ = 0.0f;
+    pitch_ = -90.0f;
+    roll_ = -90.0f;
     distance_ = std::max(0.5f, modelRadius_ * 1.2f);
     panOffset_ = QVector3D(0, 0, 0);
     updateProjection(viewportW_, viewportH_);
+    emit anglesChanged(yaw_, pitch_, roll_);
+    emit panChanged(panOffset_.x(), panOffset_.y(), panOffset_.z());
     update();
 }
 
@@ -1075,15 +1094,30 @@ void GLModelView::updateSkinning(std::uint32_t globalTimeMs)
 
     auto skinAverage = [&](const ModelVertex& base, const ModelData::SkinGroup& group, ModelVertex& outV) -> bool
     {
-        // Collect up to 4 valid node indices.
-        int bones[4] = {-1,-1,-1,-1};
+        // WC3 SD skinning uses matrix groups without explicit weights.
+        // Most geosets need up to 4 bones per vertex, but a few use "extended vertex groups"
+        // and require up to 8 bones (mdx-m3-viewer chooses this when any MTGC entry > 4).
+        // We support up to 8 here, and average the transformed results.
+        const int maxBones = (group.nodeIndices.size() > 4) ? 8 : 4;
+
+        int bones[8] = {-1,-1,-1,-1,-1,-1,-1,-1};
         int boneCount = 0;
         for (int idx : group.nodeIndices)
         {
             if (idx < 0 || std::size_t(idx) >= nodeWorld.size())
                 continue;
+
+            // Avoid duplicates (bad models sometimes repeat indices).
+            bool dup = false;
+            for (int j = 0; j < boneCount; ++j)
+            {
+                if (bones[j] == idx) { dup = true; break; }
+            }
+            if (dup)
+                continue;
+
             bones[boneCount++] = idx;
-            if (boneCount == 4)
+            if (boneCount == maxBones)
                 break;
         }
 
@@ -1211,6 +1245,7 @@ void GLModelView::paintGL()
     view.translate(0, 0, -distance_);
     view.rotate(pitch_, 1, 0, 0);
     view.rotate(yaw_, 0, 1, 0);
+    view.rotate(roll_, 0, 0, 1);
     view.translate(-(modelCenter_ + panOffset_));
 
     QMatrix4x4 modelM;
@@ -1587,6 +1622,7 @@ void GLModelView::mouseMoveEvent(QMouseEvent* e)
 
     const bool panMode = (e->buttons() & Qt::RightButton) ||
                          ((e->buttons() & Qt::LeftButton) && (e->modifiers() & Qt::ControlModifier));
+    const bool rollMode = (e->buttons() & Qt::LeftButton) && (e->modifiers() & Qt::ShiftModifier);
 
     if (panMode)
     {
@@ -1594,10 +1630,20 @@ void GLModelView::mouseMoveEvent(QMouseEvent* e)
         rot.setToIdentity();
         rot.rotate(yaw_, 0, 1, 0);
         rot.rotate(pitch_, 1, 0, 0);
+        rot.rotate(roll_, 0, 0, 1);
         const QVector3D right = rot.mapVector(QVector3D(1, 0, 0));
         const QVector3D up = rot.mapVector(QVector3D(0, 1, 0));
         const float scale = std::max(0.001f, distance_ * 0.002f);
         panOffset_ += (-right * float(delta.x()) + up * float(delta.y())) * scale;
+        emit panChanged(panOffset_.x(), panOffset_.y(), panOffset_.z());
+        update();
+        return;
+    }
+
+    if (rollMode)
+    {
+        roll_ += delta.x() * 0.4f;
+        emit anglesChanged(yaw_, pitch_, roll_);
         update();
         return;
     }
@@ -1607,6 +1653,7 @@ void GLModelView::mouseMoveEvent(QMouseEvent* e)
         yaw_ += delta.x() * 0.4f;
         pitch_ += delta.y() * 0.4f;
         pitch_ = clampf(pitch_, -89.0f, 89.0f);
+        emit anglesChanged(yaw_, pitch_, roll_);
         update();
     }
 }

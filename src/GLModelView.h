@@ -29,6 +29,8 @@ public:
     void setVfs(const std::shared_ptr<class IVfs>& vfs);
     void resetView();
     void setBackgroundAlpha(float alpha);
+    void setCameraAngles(float yaw, float pitch, float roll);
+    void setCameraPan(float x, float y, float z);
 
     // Animation / playback
     // Default = 1.0; clamped to [0.05, 10.0]
@@ -37,6 +39,8 @@ public:
 signals:
     void statusTextChanged(const QString& text);
     void missingTexturesChanged(const QStringList& missing);
+    void anglesChanged(float yaw, float pitch, float roll);
+    void panChanged(float x, float y, float z);
 
 protected:
     void initializeGL() override;
@@ -139,6 +143,7 @@ private:
     QPoint lastMouse_;
     float yaw_ = 30.0f;
     float pitch_ = -25.0f;
+    float roll_ = 0.0f;
     float distance_ = 6.0f;
     float near_ = 0.05f;
     float far_ = 2000.0f;

@@ -27,6 +27,10 @@
 #include <QComboBox>
 #include <QGroupBox>
 #include <QFrame>
+#include <QDoubleSpinBox>
+#include <QFormLayout>
+#include <QSignalBlocker>
+#include <QTextStream>
 #include <QtConcurrent/QtConcurrent>
 
 #include "GLModelView.h"
@@ -260,6 +264,57 @@ void MainWindow::buildUi()
 
     panelLayout->addWidget(controlBox);
 
+    auto* cameraBox = new QGroupBox("Camera");
+    auto* cameraLayout = new QFormLayout(cameraBox);
+    cameraLayout->setLabelAlignment(Qt::AlignLeft);
+    cameraLayout->setFormAlignment(Qt::AlignTop);
+    cameraLayout->setHorizontalSpacing(10);
+    cameraLayout->setVerticalSpacing(8);
+
+    yawSpin_ = new QDoubleSpinBox();
+    yawSpin_->setRange(-180.0, 180.0);
+    yawSpin_->setDecimals(1);
+    yawSpin_->setSingleStep(1.0);
+
+    pitchSpin_ = new QDoubleSpinBox();
+    pitchSpin_->setRange(-89.0, 89.0);
+    pitchSpin_->setDecimals(1);
+    pitchSpin_->setSingleStep(1.0);
+
+    rollSpin_ = new QDoubleSpinBox();
+    rollSpin_->setRange(-180.0, 180.0);
+    rollSpin_->setDecimals(1);
+    rollSpin_->setSingleStep(1.0);
+    rollSpin_->setValue(0.0);
+
+    yawSpin_->setValue(0.0);
+    pitchSpin_->setValue(0.0);
+
+    cameraLayout->addRow("Yaw", yawSpin_);
+    cameraLayout->addRow("Pitch", pitchSpin_);
+    cameraLayout->addRow("Roll", rollSpin_);
+
+    panXSpin_ = new QDoubleSpinBox();
+    panXSpin_->setRange(-99999.0, 99999.0);
+    panXSpin_->setDecimals(2);
+    panXSpin_->setSingleStep(1.0);
+
+    panYSpin_ = new QDoubleSpinBox();
+    panYSpin_->setRange(-99999.0, 99999.0);
+    panYSpin_->setDecimals(2);
+    panYSpin_->setSingleStep(1.0);
+
+    panZSpin_ = new QDoubleSpinBox();
+    panZSpin_->setRange(-99999.0, 99999.0);
+    panZSpin_->setDecimals(2);
+    panZSpin_->setSingleStep(1.0);
+
+    cameraLayout->addRow("Pan X", panXSpin_);
+    cameraLayout->addRow("Pan Y", panYSpin_);
+    cameraLayout->addRow("Pan Z", panZSpin_);
+
+    panelLayout->addWidget(cameraBox);
+
     auto* opsBox = new QGroupBox("Actions");
     auto* opsLayout = new QVBoxLayout(opsBox);
     opsLayout->setSpacing(8);
@@ -363,6 +418,50 @@ void MainWindow::buildUi()
         const float a = float(v) / 100.0f;
         if (viewer_)
             viewer_->setBackgroundAlpha(a);
+    });
+
+    auto applyAngles = [this]() {
+        if (!viewer_ || !yawSpin_ || !pitchSpin_ || !rollSpin_)
+            return;
+        viewer_->setCameraAngles(float(yawSpin_->value()),
+                                 float(pitchSpin_->value()),
+                                 float(rollSpin_->value()));
+    };
+    connect(yawSpin_, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, [applyAngles](double){ applyAngles(); });
+    connect(pitchSpin_, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, [applyAngles](double){ applyAngles(); });
+    connect(rollSpin_, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, [applyAngles](double){ applyAngles(); });
+
+    connect(viewer_, &GLModelView::anglesChanged, this, [this](float yaw, float pitch, float roll){
+        if (!yawSpin_ || !pitchSpin_ || !rollSpin_)
+            return;
+        const QSignalBlocker blockYaw(*yawSpin_);
+        const QSignalBlocker blockPitch(*pitchSpin_);
+        const QSignalBlocker blockRoll(*rollSpin_);
+        yawSpin_->setValue(yaw);
+        pitchSpin_->setValue(pitch);
+        rollSpin_->setValue(roll);
+    });
+
+    auto applyPan = [this]() {
+        if (!viewer_ || !panXSpin_ || !panYSpin_ || !panZSpin_)
+            return;
+        viewer_->setCameraPan(float(panXSpin_->value()),
+                              float(panYSpin_->value()),
+                              float(panZSpin_->value()));
+    };
+    connect(panXSpin_, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, [applyPan](double){ applyPan(); });
+    connect(panYSpin_, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, [applyPan](double){ applyPan(); });
+    connect(panZSpin_, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, [applyPan](double){ applyPan(); });
+
+    connect(viewer_, &GLModelView::panChanged, this, [this](float x, float y, float z){
+        if (!panXSpin_ || !panYSpin_ || !panZSpin_)
+            return;
+        const QSignalBlocker blockX(*panXSpin_);
+        const QSignalBlocker blockY(*panYSpin_);
+        const QSignalBlocker blockZ(*panZSpin_);
+        panXSpin_->setValue(x);
+        panYSpin_->setValue(y);
+        panZSpin_->setValue(z);
     });
 
     resize(1280, 720);
@@ -525,6 +624,135 @@ void MainWindow::exportDiagnostics()
     copyFile(QDir(QDir::current()).filePath("src/BlpLoader.h"), "src/BlpLoader.h");
     copyFile(QDir(QDir::current()).filePath("src/ModelData.h"), "src/ModelData.h");
 
+    // Model diagnostics (geosets / groups / objects)
+    {
+        const QString diagDir = QDir(stagingRoot).filePath("diagnostics");
+        QDir().mkpath(diagDir);
+        QFile diagFile(QDir(diagDir).filePath("model_dump.txt"));
+        if (diagFile.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text))
+        {
+            QTextStream ts(&diagFile);
+
+            QString selectedPath;
+            if (list_ && list_->selectionModel())
+            {
+                const QModelIndex current = list_->selectionModel()->currentIndex();
+                if (current.isValid())
+                {
+                    const QModelIndex src = proxyModel_->mapToSource(current);
+                    selectedPath = src.data(Qt::UserRole).toString();
+                }
+            }
+
+            ts << "Selected model: " << (selectedPath.isEmpty() ? "<none>" : selectedPath) << "\n";
+
+            std::shared_ptr<ModelData> model;
+            if (!selectedPath.isEmpty())
+            {
+                if (auto it = modelCache_.find(selectedPath); it != modelCache_.end())
+                {
+                    model = it.value();
+                }
+                else
+                {
+                    QString err;
+                    auto loaded = MdxLoader::LoadFromFile(selectedPath, &err);
+                    if (loaded)
+                        model = std::make_shared<ModelData>(std::move(*loaded));
+                    else
+                        ts << "Load failed: " << err << "\n";
+                }
+            }
+
+            if (!model)
+            {
+                ts << "No model data available.\n";
+            }
+            else
+            {
+                ts << "Geosets: " << model->geosetDiagnostics.size() << "\n";
+
+                QMap<int, int> groupSizeHist;
+                QMap<int, int> vertexGroupUsage;
+
+                for (std::size_t gi = 0; gi < model->geosetDiagnostics.size(); ++gi)
+                {
+                    const auto& gd = model->geosetDiagnostics[gi];
+                    ts << "\n[Geoset " << gi << "]\n";
+                    ts << "GNDX count: " << gd.gndx.size() << "\n";
+                    ts << "MTGC count: " << gd.mtgc.size() << "\n";
+                    ts << "MATS count: " << gd.mats.size() << "\n";
+
+                    if (!gd.mtgc.empty())
+                    {
+                        for (std::uint8_t vg : gd.gndx)
+                            Q_ASSERT(vg < gd.mtgc.size());
+                    }
+
+                    std::size_t mtgcSum = 0;
+                    for (std::uint32_t sz : gd.mtgc)
+                    {
+                        mtgcSum += sz;
+                        groupSizeHist[int(sz)] += 1;
+                    }
+                    Q_ASSERT(mtgcSum <= gd.mats.size());
+
+                    auto joinU8 = [](const std::vector<std::uint8_t>& v) {
+                        QStringList out;
+                        out.reserve(int(v.size()));
+                        for (auto x : v) out << QString::number(int(x));
+                        return out.join(", ");
+                    };
+                    auto joinU32 = [](const std::vector<std::uint32_t>& v) {
+                        QStringList out;
+                        out.reserve(int(v.size()));
+                        for (auto x : v) out << QString::number(x);
+                        return out.join(", ");
+                    };
+                    auto joinI32 = [](const std::vector<std::int32_t>& v) {
+                        QStringList out;
+                        out.reserve(int(v.size()));
+                        for (auto x : v) out << QString::number(x);
+                        return out.join(", ");
+                    };
+
+                    ts << "GNDX: [" << joinU8(gd.gndx) << "]\n";
+                    ts << "MTGC: [" << joinU32(gd.mtgc) << "]\n";
+                    ts << "MATS: [" << joinI32(gd.mats) << "]\n";
+
+                    ts << "Expanded groups:\n";
+                    for (std::size_t g = 0; g < gd.expandedGroups.size(); ++g)
+                        ts << "  [" << g << "] {" << joinI32(gd.expandedGroups[g]) << "}\n";
+                }
+
+                for (std::uint16_t gid : model->vertexGroups)
+                {
+                    Q_ASSERT(model->skinGroups.empty() || gid < model->skinGroups.size());
+                    vertexGroupUsage[int(gid)] += 1;
+                }
+
+                ts << "\nGroup size histogram (MTGC sizes):\n";
+                for (auto it = groupSizeHist.begin(); it != groupSizeHist.end(); ++it)
+                    ts << "  size " << it.key() << ": " << it.value() << "\n";
+
+                ts << "\nVertex group usage (GNDX -> group id):\n";
+                for (auto it = vertexGroupUsage.begin(); it != vertexGroupUsage.end(); ++it)
+                    ts << "  group " << it.key() << ": " << it.value() << "\n";
+
+                ts << "\nobjectsById (type/name/parent/pivot):\n";
+                for (std::size_t i = 0; i < model->nodes.size(); ++i)
+                {
+                    const auto& n = model->nodes[i];
+                    const QString type = n.type.empty() ? "NODE" : QString::fromStdString(n.type);
+                    const QString name = QString::fromStdString(n.name);
+                    ts << "  [" << i << "] " << type << " | " << name
+                       << " | parent=" << n.parentId
+                       << " | pivot=(" << n.pivot.x << ", " << n.pivot.y << ", " << n.pivot.z << ")\n";
+                }
+            }
+        }
+    }
+
     const QString cmd = QString("Compress-Archive -Force -Path \"%1\\*\" -DestinationPath \"%2\"")
                             .arg(stagingRoot)
                             .arg(zipPath);
@@ -562,4 +790,3 @@ void MainWindow::loadSelectedModel(const QString& filePath)
 
     modelWatcher_.setFuture(QtConcurrent::run(LoadModelFile, filePath, token));
 }
-
