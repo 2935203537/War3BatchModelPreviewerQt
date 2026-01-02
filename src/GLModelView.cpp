@@ -1056,39 +1056,61 @@ void GLModelView::updateSkinning(std::uint32_t globalTimeMs)
     for (std::size_t i = 0; i < nodeCount; ++i)
         buildNode(buildNode, i);
 
-    // Warcraft 3 classic MDX (v800) uses "matrix groups" without explicit per-vertex weights.
-    // Many custom models put multiple bones in a group; averaging them (as a naive "smooth skin")
-    // collapses the mesh into a small blob. The in-game renderer effectively behaves much closer
-    // to rigid skinning per vertex.
+    // Warcraft 3 classic MDX (v800) uses "matrix groups" (a jagged list of node indices) without
+    // explicit per-vertex weights. The common approach (and what the WC3 pipeline effectively
+    // supports) is to take up to 4 matrices for the vertex group, transform the vertex by each,
+    // sum the results, and divide by the number of matrices (a simple average). 
+    // See e.g. the mdx-m3-viewer shader and related discussions.
     //
-    // Strategy for preview:
-    //   - If a vertex group contains exactly 1 node -> use it.
-    //   - If it contains multiple nodes -> pick the node whose pivot is closest to the vertex in bind pose.
-    // This fixes the "shrunk/imploded" look for many models while remaining stable for single-node groups.
+    // This is *not* mathematically correct skinning, but it matches real-world WC3 assets better
+    // than picking a single bone for multi-matrix groups.
 
-    auto pickBestNode = [&](const ModelVertex& base, const ModelData::SkinGroup& group) -> int
+    auto skinAverage = [&](const ModelVertex& base, const ModelData::SkinGroup& group, ModelVertex& outV) -> bool
     {
-        int best = -1;
-        float bestD2 = std::numeric_limits<float>::max();
-        const QVector3D vpos(base.px, base.py, base.pz);
-
-        for (int candidate : group.nodeIndices)
+        // Collect up to 4 valid node indices.
+        int bones[4] = {-1,-1,-1,-1};
+        int boneCount = 0;
+        for (int idx : group.nodeIndices)
         {
-            if (candidate < 0 || std::size_t(candidate) >= nodeWorld.size())
+            if (idx < 0 || std::size_t(idx) >= nodeWorld.size())
                 continue;
-            // Prefer nearest pivot in bind space.
-            const auto& node = model_->nodes[std::size_t(candidate)];
-            if (node.nodeId < 0)
-                continue;
-            const QVector3D piv(node.pivot.x, node.pivot.y, node.pivot.z);
-            const float d2 = (vpos - piv).lengthSquared();
-            if (d2 < bestD2)
-            {
-                bestD2 = d2;
-                best = candidate;
-            }
+            bones[boneCount++] = idx;
+            if (boneCount == 4)
+                break;
         }
-        return best;
+
+        if (boneCount <= 0)
+            return false;
+
+        const QVector4D p4(base.px, base.py, base.pz, 1.0f);
+        const QVector4D n4(base.nx, base.ny, base.nz, 0.0f);
+
+        QVector4D sumP(0,0,0,0);
+        QVector4D sumN(0,0,0,0);
+        for (int i = 0; i < boneCount; ++i)
+        {
+            const QMatrix4x4& m = nodeWorld[std::size_t(bones[i])];
+            sumP += m * p4;
+            sumN += m * n4;
+        }
+
+        const float inv = 1.0f / float(boneCount);
+        const QVector4D avgP = sumP * inv;
+
+        QVector3D nn(sumN.x(), sumN.y(), sumN.z());
+        if (nn.lengthSquared() > 0.000001f)
+            nn.normalize();
+        else
+            nn = QVector3D(0,0,1);
+
+        outV = base;
+        outV.px = avgP.x();
+        outV.py = avgP.y();
+        outV.pz = avgP.z();
+        outV.nx = nn.x();
+        outV.ny = nn.y();
+        outV.nz = nn.z();
+        return true;
     };
 
     for (std::size_t i = 0; i < model_->bindVertices.size(); ++i)
@@ -1112,39 +1134,15 @@ void GLModelView::updateSkinning(std::uint32_t globalTimeMs)
             continue;
         }
 
-        int nodeId = -1;
-        if (group.nodeIndices.size() == 1)
+        ModelVertex v;
+        if (skinAverage(base, group, v))
         {
-            nodeId = group.nodeIndices.front();
+            skinnedVertices_[i] = v;
         }
         else
         {
-            nodeId = pickBestNode(base, group);
-        }
-
-        if (nodeId < 0 || std::size_t(nodeId) >= nodeWorld.size())
-        {
             skinnedVertices_[i] = base;
-            continue;
         }
-
-        const QMatrix4x4& m = nodeWorld[std::size_t(nodeId)];
-        const QVector3D p = m.map(QVector3D(base.px, base.py, base.pz));
-        const QMatrix3x3 nrmMat = m.normalMatrix();
-        const QVector3D n = QVector3D(
-            nrmMat(0,0) * base.nx + nrmMat(0,1) * base.ny + nrmMat(0,2) * base.nz,
-            nrmMat(1,0) * base.nx + nrmMat(1,1) * base.ny + nrmMat(1,2) * base.nz,
-            nrmMat(2,0) * base.nx + nrmMat(2,1) * base.ny + nrmMat(2,2) * base.nz
-        ).normalized();
-
-        ModelVertex v = base;
-        v.px = p.x();
-        v.py = p.y();
-        v.pz = p.z();
-        v.nx = n.x();
-        v.ny = n.y();
-        v.nz = n.z();
-        skinnedVertices_[i] = v;
     }
 
     glBindBuffer(GL_ARRAY_BUFFER, vbo_);
