@@ -47,10 +47,12 @@ struct SubMesh
 
 // Small helper vector type used by the particle system.
 struct Vec3 { float x=0, y=0, z=0; };
+struct Vec4 { float x=0, y=0, z=0, w=1; };
 
 struct ModelData
 {
     std::vector<ModelVertex> vertices;
+    std::vector<ModelVertex> bindVertices;
     std::vector<std::uint32_t> indices; // triangle list
     std::vector<SubMesh> subMeshes;
     std::uint32_t geosetCount = 0;
@@ -84,7 +86,6 @@ struct ModelData
     };
     std::vector<Pivot> pivots;
 
-
     // ---- MDX animation track ----
     enum class MdxInterp : std::int32_t
     {
@@ -111,6 +112,28 @@ struct ModelData
         std::vector<MdxTrackKey<T>> keys;
         bool empty() const { return keys.empty(); }
     };
+
+    // ---- Nodes (BONE/HELP/...) ----
+    struct Node
+    {
+        std::string name;
+        std::int32_t nodeId = -1;
+        std::int32_t parentId = -1;
+        std::uint32_t flags = 0;
+        Vec3 pivot;
+        MdxTrack<Vec3> trackTranslation;
+        MdxTrack<Vec4> trackRotation;
+        MdxTrack<Vec3> trackScaling;
+    };
+
+    std::vector<Node> nodes; // indexed by nodeId when possible
+
+    struct SkinGroup
+    {
+        std::vector<std::int32_t> nodeIndices;
+    };
+    std::vector<std::uint16_t> vertexGroups; // per-vertex group id (index into skinGroups)
+    std::vector<SkinGroup> skinGroups;
 
     struct ParticleEmitter2
     {
@@ -148,9 +171,11 @@ struct ModelData
         MdxTrack<float> trackEmissionRate; // KP2E
         MdxTrack<float> trackGravity;      // KP2G
         MdxTrack<float> trackLifespan;     // KP2L
-        MdxTrack<float> trackVisibility;   // KP2N
-        MdxTrack<float> trackVariation;    // KP2V (rare)
-        MdxTrack<float> trackLatitude;     // KP2A (rare)
+        MdxTrack<float> trackVisibility;   // KP2V
+        MdxTrack<float> trackVariation;    // KP2R
+        MdxTrack<float> trackLatitude;     // KP2L (rare)
+        MdxTrack<float> trackWidth;        // KP2W
+        MdxTrack<float> trackLength;       // KP2N
     };
 
     std::vector<ParticleEmitter2> emitters2;

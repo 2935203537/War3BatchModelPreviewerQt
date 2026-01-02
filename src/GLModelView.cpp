@@ -60,6 +60,54 @@ namespace
         return it*it*it*p0 + 3*it*it*t*c1 + 3*it*t*t*c2 + t*t*t*p1;
     }
 
+    static Vec3 lerpVec3(const Vec3& a, const Vec3& b, float t)
+    {
+        return { lerpf(a.x, b.x, t), lerpf(a.y, b.y, t), lerpf(a.z, b.z, t) };
+    }
+
+    static Vec3 hermiteVec3(const Vec3& p0, const Vec3& m0, const Vec3& p1, const Vec3& m1, float t)
+    {
+        return {
+            hermite(p0.x, m0.x, p1.x, m1.x, t),
+            hermite(p0.y, m0.y, p1.y, m1.y, t),
+            hermite(p0.z, m0.z, p1.z, m1.z, t)
+        };
+    }
+
+    static Vec3 bezierVec3(const Vec3& p0, const Vec3& c1, const Vec3& c2, const Vec3& p1, float t)
+    {
+        return {
+            bezier(p0.x, c1.x, c2.x, p1.x, t),
+            bezier(p0.y, c1.y, c2.y, p1.y, t),
+            bezier(p0.z, c1.z, c2.z, p1.z, t)
+        };
+    }
+
+    static Vec4 lerpVec4(const Vec4& a, const Vec4& b, float t)
+    {
+        return { lerpf(a.x, b.x, t), lerpf(a.y, b.y, t), lerpf(a.z, b.z, t), lerpf(a.w, b.w, t) };
+    }
+
+    static Vec4 hermiteVec4(const Vec4& p0, const Vec4& m0, const Vec4& p1, const Vec4& m1, float t)
+    {
+        return {
+            hermite(p0.x, m0.x, p1.x, m1.x, t),
+            hermite(p0.y, m0.y, p1.y, m1.y, t),
+            hermite(p0.z, m0.z, p1.z, m1.z, t),
+            hermite(p0.w, m0.w, p1.w, m1.w, t)
+        };
+    }
+
+    static Vec4 bezierVec4(const Vec4& p0, const Vec4& c1, const Vec4& c2, const Vec4& p1, float t)
+    {
+        return {
+            bezier(p0.x, c1.x, c2.x, p1.x, t),
+            bezier(p0.y, c1.y, c2.y, p1.y, t),
+            bezier(p0.z, c1.z, c2.z, p1.z, t),
+            bezier(p0.w, c1.w, c2.w, p1.w, t)
+        };
+    }
+
     static float sampleTrackFloat(const MdxTrack<float>& tr, std::uint32_t timeMs, float def, const ModelData& model)
     {
         if (tr.keys.empty())
@@ -108,6 +156,96 @@ namespace
         }
     }
 
+    static Vec3 sampleTrackVec3(const MdxTrack<Vec3>& tr, std::uint32_t timeMs, const Vec3& def, const ModelData& model)
+    {
+        if (tr.keys.empty())
+            return def;
+
+        if (tr.globalSeqId >= 0 && std::size_t(tr.globalSeqId) < model.globalSequencesMs.size())
+        {
+            const std::uint32_t len = model.globalSequencesMs[std::size_t(tr.globalSeqId)];
+            if (len != 0)
+                timeMs = timeMs % len;
+        }
+
+        const auto& keys = tr.keys;
+        if (timeMs <= keys.front().timeMs)
+            return keys.front().value;
+        if (timeMs >= keys.back().timeMs)
+            return keys.back().value;
+
+        std::size_t hi = 1;
+        while (hi < keys.size() && timeMs > keys[hi].timeMs)
+            ++hi;
+        if (hi >= keys.size())
+            return keys.back().value;
+        const std::size_t lo = hi - 1;
+
+        const auto& k0 = keys[lo];
+        const auto& k1 = keys[hi];
+        const float denom = float(k1.timeMs - k0.timeMs);
+        const float t = denom > 0.0f ? float(timeMs - k0.timeMs) / denom : 0.0f;
+
+        switch (tr.interp)
+        {
+        case MdxInterp::None:
+            return k0.value;
+        case MdxInterp::Linear:
+            return lerpVec3(k0.value, k1.value, t);
+        case MdxInterp::Hermite:
+            return hermiteVec3(k0.value, k0.outTan, k1.value, k1.inTan, t);
+        case MdxInterp::Bezier:
+            return bezierVec3(k0.value, k0.outTan, k1.inTan, k1.value, t);
+        default:
+            return k0.value;
+        }
+    }
+
+    static Vec4 sampleTrackVec4(const MdxTrack<Vec4>& tr, std::uint32_t timeMs, const Vec4& def, const ModelData& model)
+    {
+        if (tr.keys.empty())
+            return def;
+
+        if (tr.globalSeqId >= 0 && std::size_t(tr.globalSeqId) < model.globalSequencesMs.size())
+        {
+            const std::uint32_t len = model.globalSequencesMs[std::size_t(tr.globalSeqId)];
+            if (len != 0)
+                timeMs = timeMs % len;
+        }
+
+        const auto& keys = tr.keys;
+        if (timeMs <= keys.front().timeMs)
+            return keys.front().value;
+        if (timeMs >= keys.back().timeMs)
+            return keys.back().value;
+
+        std::size_t hi = 1;
+        while (hi < keys.size() && timeMs > keys[hi].timeMs)
+            ++hi;
+        if (hi >= keys.size())
+            return keys.back().value;
+        const std::size_t lo = hi - 1;
+
+        const auto& k0 = keys[lo];
+        const auto& k1 = keys[hi];
+        const float denom = float(k1.timeMs - k0.timeMs);
+        const float t = denom > 0.0f ? float(timeMs - k0.timeMs) / denom : 0.0f;
+
+        switch (tr.interp)
+        {
+        case MdxInterp::None:
+            return k0.value;
+        case MdxInterp::Linear:
+            return lerpVec4(k0.value, k1.value, t);
+        case MdxInterp::Hermite:
+            return hermiteVec4(k0.value, k0.outTan, k1.value, k1.inTan, t);
+        case MdxInterp::Bezier:
+            return bezierVec4(k0.value, k0.outTan, k1.inTan, k1.value, t);
+        default:
+            return k0.value;
+        }
+    }
+
     // MDX Layer shading flags (common ones used for preview)
     constexpr std::uint32_t LAYER_UNSHADED   = 0x1;
     constexpr std::uint32_t LAYER_TWOSIDED   = 0x10;
@@ -132,6 +270,11 @@ GLModelView::~GLModelView()
     makeCurrent();
     clearGpuResources();
     doneCurrent();
+}
+
+void GLModelView::setGlPhase(const char* phase)
+{
+    glPhase_ = QString::fromLatin1(phase);
 }
 
 void GLModelView::setPlaybackSpeed(float speed)
@@ -234,6 +377,7 @@ void GLModelView::setModel(std::optional<ModelData> model, const QString& displa
     modelPath_ = filePath;
     modelDir_ = filePath.isEmpty() ? QString() : QFileInfo(filePath).absolutePath();
     model_ = std::move(model);
+    skinnedVertices_.clear();
 
     missingTextures_.clear();
     missingTextureSet_.clear();
@@ -312,12 +456,21 @@ void GLModelView::initializeGL()
     {
         glLoggerReady_ = true;
         connect(&glLogger_, &QOpenGLDebugLogger::messageLogged, this,
-                [](const QOpenGLDebugMessage& msg){
+                [this](const QOpenGLDebugMessage& msg){
                     const QString line = QString("GL: [%1] %2 (id=%3)")
                                              .arg(msg.severity())
                                              .arg(msg.message())
                                              .arg(msg.id());
-                    LogSink::instance().log(line);
+                    if (msg.id() == 1281)
+                    {
+                        LogSink::instance().log(QString("%1 | phase=%2")
+                                                    .arg(line)
+                                                    .arg(glPhase_.isEmpty() ? "unknown" : glPhase_));
+                    }
+                    else
+                    {
+                        LogSink::instance().log(line);
+                    }
                 });
         glLogger_.startLogging(QOpenGLDebugLogger::SynchronousLogging);
         glLogger_.enableMessages();
@@ -513,6 +666,26 @@ void GLModelView::initializeGL()
 
     glBindVertexArray(0);
 
+    // Sanity triangle (hardcoded)
+    {
+        const DebugVertex tri[3] = {
+            {0.0f, 0.0f, 0.0f, 0.95f, 0.2f, 0.2f, 1.0f},
+            {0.35f, 0.0f, 0.0f, 0.2f, 0.95f, 0.2f, 1.0f},
+            {0.0f, 0.35f, 0.0f, 0.2f, 0.2f, 0.95f, 1.0f},
+        };
+        glGenVertexArrays(1, &sanityVao_);
+        glBindVertexArray(sanityVao_);
+        glGenBuffers(1, &sanityVbo_);
+        glBindBuffer(GL_ARRAY_BUFFER, sanityVbo_);
+        glBufferData(GL_ARRAY_BUFFER, sizeof(tri), tri, GL_STATIC_DRAW);
+
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(DebugVertex), (void*)offsetof(DebugVertex, px));
+        glEnableVertexAttribArray(1);
+        glVertexAttribPointer(1, 4, GL_FLOAT, GL_FALSE, sizeof(DebugVertex), (void*)offsetof(DebugVertex, r));
+        glBindVertexArray(0);
+    }
+
     rebuildGpuBuffers();
 }
 
@@ -556,6 +729,7 @@ void GLModelView::updateEmitters(float dtSeconds)
         const std::uint32_t local = (len != 0) ? (localTimeMs_ % len) : 0;
         globalTimeMs = start + local;
     }
+    lastGlobalTimeMs_ = globalTimeMs;
 
     // RNG (fixed seed per run; adequate for preview)
     static thread_local std::mt19937 rng(1337u);
@@ -578,9 +752,13 @@ void GLModelView::updateEmitters(float dtSeconds)
         }
 
         const float speed = sampleTrackFloat(e.trackSpeed, globalTimeMs, e.speed, *model_);
+        const float variation = sampleTrackFloat(e.trackVariation, globalTimeMs, e.variation, *model_);
+        const float latitude = sampleTrackFloat(e.trackLatitude, globalTimeMs, e.latitude, *model_);
         const float emissionRate = std::max(0.0f, sampleTrackFloat(e.trackEmissionRate, globalTimeMs, e.emissionRate, *model_));
         const float gravity = sampleTrackFloat(e.trackGravity, globalTimeMs, e.gravity, *model_);
         const float lifespan = std::max(0.01f, sampleTrackFloat(e.trackLifespan, globalTimeMs, e.lifespan, *model_));
+        const float width = sampleTrackFloat(e.trackWidth, globalTimeMs, e.width, *model_);
+        const float length = sampleTrackFloat(e.trackLength, globalTimeMs, e.length, *model_);
 
         // Spawn particles
         if (vis > 0.001f && emissionRate > 0.0f)
@@ -606,12 +784,12 @@ void GLModelView::updateEmitters(float dtSeconds)
                     p.life = lifespan;
 
                     // Initial position: pivot + small scatter in X/Y using width/length
-                    const float sx = randSigned() * e.width;
-                    const float sy = randSigned() * e.length;
+                    const float sx = randSigned() * width;
+                    const float sy = randSigned() * length;
                     p.pos = pivot + QVector3D(sx, sy, 0.0f);
 
                     // Direction within latitude (simplified)
-                    const float lat = e.latitude;
+                    const float lat = latitude;
                     const float ax = randSigned() * lat;
                     const float ay = randSigned() * lat;
 
@@ -621,7 +799,7 @@ void GLModelView::updateEmitters(float dtSeconds)
                     dir = (qy * qx).rotatedVector(dir);
                     dir.normalize();
 
-                    const float sp = speed + randSigned() * e.variation;
+                    const float sp = speed + randSigned() * variation;
                     p.vel = dir * sp;
 
                     rt.particles.push_back(p);
@@ -702,6 +880,7 @@ void GLModelView::drawDebug(const QMatrix4x4& mvp)
     if (!debugProgramReady_ || debugVao_ == 0 || debugVerts_.empty())
         return;
 
+    setGlPhase("debug-lines");
     debugProgram_.bind();
     debugProgram_.setUniformValue("uMVP", mvp);
 
@@ -713,7 +892,7 @@ void GLModelView::drawDebug(const QMatrix4x4& mvp)
                  GL_DYNAMIC_DRAW);
 
     glDisable(GL_DEPTH_TEST);
-    glLineWidth(1.5f);
+    glLineWidth(1.0f);
     glDrawArrays(GL_LINES, 0, GLsizei(debugVerts_.size()));
     lastDrawCalls_ += 1;
     glLineWidth(1.0f);
@@ -721,6 +900,145 @@ void GLModelView::drawDebug(const QMatrix4x4& mvp)
 
     glBindVertexArray(0);
     debugProgram_.release();
+}
+
+void GLModelView::updateSkinning(std::uint32_t globalTimeMs)
+{
+    if (!model_)
+        return;
+    if (model_->bindVertices.empty() || model_->vertexGroups.size() != model_->bindVertices.size())
+        return;
+    if (model_->skinGroups.empty() || model_->nodes.empty())
+        return;
+    if (vbo_ == 0)
+        return;
+
+    if (skinnedVertices_.size() != model_->bindVertices.size())
+        skinnedVertices_ = model_->bindVertices;
+
+    const std::size_t nodeCount = model_->nodes.size();
+    std::vector<QMatrix4x4> nodeWorld(nodeCount);
+    std::vector<int> state(nodeCount, 0);
+
+    auto buildNode = [&](auto&& self, std::size_t idx) -> void
+    {
+        if (idx >= nodeCount)
+            return;
+        if (state[idx] == 2)
+            return;
+        if (state[idx] == 1)
+        {
+            nodeWorld[idx].setToIdentity();
+            state[idx] = 2;
+            return;
+        }
+        state[idx] = 1;
+
+        const auto& n = model_->nodes[idx];
+        const Vec3 defT{0,0,0};
+        const Vec3 defS{1,1,1};
+        const Vec4 defR{0,0,0,1};
+
+        const Vec3 t = sampleTrackVec3(n.trackTranslation, globalTimeMs, defT, *model_);
+        const Vec3 s = sampleTrackVec3(n.trackScaling, globalTimeMs, defS, *model_);
+        Vec4 r = sampleTrackVec4(n.trackRotation, globalTimeMs, defR, *model_);
+        const float rlen = std::sqrt(r.x*r.x + r.y*r.y + r.z*r.z + r.w*r.w);
+        if (rlen > 0.00001f)
+        {
+            r.x /= rlen; r.y /= rlen; r.z /= rlen; r.w /= rlen;
+        }
+
+        const QVector3D pivot(n.pivot.x, n.pivot.y, n.pivot.z);
+        QQuaternion q(r.w, r.x, r.y, r.z);
+
+        QMatrix4x4 local;
+        local.setToIdentity();
+        local.translate(pivot.x() + t.x, pivot.y() + t.y, pivot.z() + t.z);
+        local.rotate(q);
+        local.scale(s.x, s.y, s.z);
+        local.translate(-pivot);
+
+        if (n.parentId >= 0 && std::size_t(n.parentId) < nodeCount)
+        {
+            self(self, std::size_t(n.parentId));
+            nodeWorld[idx] = nodeWorld[std::size_t(n.parentId)] * local;
+        }
+        else
+        {
+            nodeWorld[idx] = local;
+        }
+
+        state[idx] = 2;
+    };
+
+    for (std::size_t i = 0; i < nodeCount; ++i)
+        buildNode(buildNode, i);
+
+    for (std::size_t i = 0; i < model_->bindVertices.size(); ++i)
+    {
+        const auto& base = model_->bindVertices[i];
+        if (i >= model_->vertexGroups.size())
+        {
+            skinnedVertices_[i] = base;
+            continue;
+        }
+        const std::uint16_t gid = model_->vertexGroups[i];
+        if (gid >= model_->skinGroups.size())
+        {
+            skinnedVertices_[i] = base;
+            continue;
+        }
+        const auto& group = model_->skinGroups[gid];
+        if (group.nodeIndices.empty())
+        {
+            skinnedVertices_[i] = base;
+            continue;
+        }
+
+        QVector3D accPos(0,0,0);
+        QVector3D accNrm(0,0,0);
+        int used = 0;
+        for (int nodeIndex : group.nodeIndices)
+        {
+            if (nodeIndex < 0 || std::size_t(nodeIndex) >= nodeWorld.size())
+                continue;
+            const QMatrix4x4& m = nodeWorld[std::size_t(nodeIndex)];
+            const QVector3D p = m.map(QVector3D(base.px, base.py, base.pz));
+            const QMatrix3x3 nrmMat = m.normalMatrix();
+            const QVector3D n = QVector3D(
+                nrmMat(0,0) * base.nx + nrmMat(0,1) * base.ny + nrmMat(0,2) * base.nz,
+                nrmMat(1,0) * base.nx + nrmMat(1,1) * base.ny + nrmMat(1,2) * base.nz,
+                nrmMat(2,0) * base.nx + nrmMat(2,1) * base.ny + nrmMat(2,2) * base.nz
+            ).normalized();
+            accPos += p;
+            accNrm += n;
+            used++;
+        }
+
+        if (used == 0)
+        {
+            skinnedVertices_[i] = base;
+            continue;
+        }
+
+        accPos /= float(used);
+        accNrm.normalize();
+
+        ModelVertex v = base;
+        v.px = accPos.x();
+        v.py = accPos.y();
+        v.pz = accPos.z();
+        v.nx = accNrm.x();
+        v.ny = accNrm.y();
+        v.nz = accNrm.z();
+        skinnedVertices_[i] = v;
+    }
+
+    glBindBuffer(GL_ARRAY_BUFFER, vbo_);
+    glBufferSubData(GL_ARRAY_BUFFER,
+                    0,
+                    GLsizeiptr(skinnedVertices_.size() * sizeof(ModelVertex)),
+                    skinnedVertices_.data());
 }
 
 void GLModelView::updateStatusText()
@@ -757,6 +1075,7 @@ void GLModelView::updateStatusText()
 void GLModelView::paintGL()
 {
     glViewport(0, 0, width(), height());
+    setGlPhase("clear");
     glClearColor(0.15f, 0.15f, 0.15f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
@@ -778,9 +1097,27 @@ void GLModelView::paintGL()
     const QMatrix4x4 mvp = proj_ * view * modelM;
     const QMatrix3x3 normalMat = modelM.normalMatrix();
 
+    // --- Sanity triangle (verifies pipeline before model draw)
+    if (debugProgramReady_ && sanityVao_ != 0)
+    {
+        setGlPhase("sanity-triangle");
+        glDisable(GL_DEPTH_TEST);
+        debugProgram_.bind();
+        debugProgram_.setUniformValue("uMVP", mvp);
+        glBindVertexArray(sanityVao_);
+        glDrawArrays(GL_TRIANGLES, 0, 3);
+        glBindVertexArray(0);
+        debugProgram_.release();
+        glEnable(GL_DEPTH_TEST);
+        lastDrawCalls_ += 1;
+    }
+
+    updateSkinning(lastGlobalTimeMs_);
+
     // --- Draw mesh (if any)
     if (programReady_ && vao_ != 0 && !model_->indices.empty())
     {
+        setGlPhase("mesh");
         if (wireframe_ && !isGles_)
             glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
 
@@ -899,6 +1236,7 @@ void GLModelView::paintGL()
     // --- Draw particles (PRE2)
     if (particleProgramReady_ && pVao_ != 0 && !model_->emitters2.empty())
     {
+        setGlPhase("particles");
         particleProgram_.bind();
         particleProgram_.setUniformValue("uMVP", mvp);
         particleProgram_.setUniformValue("uTex", 0);
@@ -1204,6 +1542,8 @@ void GLModelView::clearGpuResources()
     if (pVao_) { glDeleteVertexArrays(1, &pVao_); pVao_ = 0; }
     if (debugVbo_) { glDeleteBuffers(1, &debugVbo_); debugVbo_ = 0; }
     if (debugVao_) { glDeleteVertexArrays(1, &debugVao_); debugVao_ = 0; }
+    if (sanityVbo_) { glDeleteBuffers(1, &sanityVbo_); sanityVbo_ = 0; }
+    if (sanityVao_) { glDeleteVertexArrays(1, &sanityVao_); sanityVao_ = 0; }
 
     for (auto& kv : textureCache_)
     {
@@ -1262,10 +1602,13 @@ void GLModelView::rebuildGpuBuffers()
 
     glGenBuffers(1, &vbo_);
     glBindBuffer(GL_ARRAY_BUFFER, vbo_);
+    const bool useSkinning = !model_->skinGroups.empty() &&
+                             model_->vertexGroups.size() == model_->vertices.size();
+    const auto& srcVerts = model_->bindVertices.empty() ? model_->vertices : model_->bindVertices;
     glBufferData(GL_ARRAY_BUFFER,
-                 GLsizeiptr(model_->vertices.size() * sizeof(ModelVertex)),
-                 model_->vertices.data(),
-                 GL_STATIC_DRAW);
+                 GLsizeiptr(srcVerts.size() * sizeof(ModelVertex)),
+                 srcVerts.data(),
+                 useSkinning ? GL_DYNAMIC_DRAW : GL_STATIC_DRAW);
 
     glGenBuffers(1, &ibo_);
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ibo_);

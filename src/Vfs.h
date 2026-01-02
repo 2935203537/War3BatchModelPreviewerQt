@@ -52,7 +52,8 @@ private:
     };
 
     QString normalizePath(const QString& path) const;
-    bool openFileFromArchives(const QString& normPath, const QString& altPath, void** outFileHandle, QString* outArchive) const;
+    QStringList buildCandidatePaths(const QString& path) const;
+    bool openFileFromArchives(const QStringList& candidates, void** outFileHandle, QString* outArchive) const;
 
     std::vector<Archive> archives_;
 };

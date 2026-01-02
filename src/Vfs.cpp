@@ -7,6 +7,7 @@
 #include "LogSink.h"
 
 #include <StormLib.h>
+#include <windows.h>
 
 DiskVfs::DiskVfs(QString rootPath)
     : root_(std::move(rootPath))
@@ -73,6 +74,21 @@ QString MpqVfs::normalizePath(const QString& path) const
     return p;
 }
 
+QStringList MpqVfs::buildCandidatePaths(const QString& path) const
+{
+    const QString norm = normalizePath(path);
+    QStringList candidates;
+    auto add = [&](const QString& s)
+    {
+        if (!s.isEmpty() && !candidates.contains(s))
+            candidates.append(s);
+    };
+    add(norm);
+    add(norm.toUpper());
+    add(norm.toLower());
+    return candidates;
+}
+
 bool MpqVfs::mountWar3Root(const QString& rootPath)
 {
     for (auto& a : archives_)
@@ -83,12 +99,22 @@ bool MpqVfs::mountWar3Root(const QString& rootPath)
     }
     archives_.clear();
 
-    const QStringList names = {
-        "War3.mpq",
-        "War3x.mpq",
-        "War3xLocal.mpq",
-        "War3Patch.mpq"
-    };
+    QStringList names;
+    names << "War3.mpq" << "War3x.mpq";
+
+    QDir root(rootPath);
+    const QStringList locals = root.entryList(QStringList() << "War3xLocal*.mpq",
+                                              QDir::Files,
+                                              QDir::Name);
+    for (const auto& local : locals)
+    {
+        if (!names.contains(local))
+            names << local;
+    }
+
+    // Patch goes last for highest priority.
+    if (!names.contains("War3Patch.mpq"))
+        names << "War3Patch.mpq";
 
     for (const auto& name : names)
     {
@@ -113,7 +139,8 @@ bool MpqVfs::mountWar3Root(const QString& rootPath)
         }
         else
         {
-            LogSink::instance().log(QString("MPQ mount failed: %1").arg(full));
+            const DWORD err = GetLastError();
+            LogSink::instance().log(QString("MPQ mount failed: %1 (err=%2)").arg(full).arg(err));
         }
     }
 
@@ -133,22 +160,15 @@ QStringList MpqVfs::mountedArchives() const
     return out;
 }
 
-bool MpqVfs::openFileFromArchives(const QString& normPath, const QString& altPath, void** outFileHandle, QString* outArchive) const
+bool MpqVfs::openFileFromArchives(const QStringList& candidates, void** outFileHandle, QString* outArchive) const
 {
-    const QByteArray normBytes = normPath.toUtf8();
-    const QByteArray altBytes = altPath.toUtf8();
     for (auto it = archives_.rbegin(); it != archives_.rend(); ++it)
     {
-        HANDLE hFile = nullptr;
-        if (SFileOpenFileEx(it->handle, normBytes.constData(), SFILE_OPEN_FROM_MPQ, &hFile))
+        for (const auto& candidate : candidates)
         {
-            if (outFileHandle) *outFileHandle = hFile;
-            if (outArchive) *outArchive = it->path;
-            return true;
-        }
-        if (!altPath.isEmpty() && altPath != normPath)
-        {
-            if (SFileOpenFileEx(it->handle, altBytes.constData(), SFILE_OPEN_FROM_MPQ, &hFile))
+            const QByteArray bytes = candidate.toUtf8();
+            HANDLE hFile = nullptr;
+            if (SFileOpenFileEx(it->handle, bytes.constData(), SFILE_OPEN_FROM_MPQ, &hFile))
             {
                 if (outFileHandle) *outFileHandle = hFile;
                 if (outArchive) *outArchive = it->path;
@@ -161,12 +181,11 @@ bool MpqVfs::openFileFromArchives(const QString& normPath, const QString& altPat
 
 bool MpqVfs::exists(const QString& path) const
 {
-    const QString norm = normalizePath(path);
-    const QString alt = norm.toUpper();
+    const QStringList candidates = buildCandidatePaths(path);
 
     void* hFile = nullptr;
     QString archive;
-    const bool ok = openFileFromArchives(norm, alt, &hFile, &archive);
+    const bool ok = openFileFromArchives(candidates, &hFile, &archive);
     if (ok && hFile)
         SFileCloseFile(hFile);
     return ok;
@@ -174,14 +193,22 @@ bool MpqVfs::exists(const QString& path) const
 
 QByteArray MpqVfs::readAll(const QString& path) const
 {
-    const QString norm = normalizePath(path);
-    const QString alt = norm.toUpper();
+    const QStringList candidates = buildCandidatePaths(path);
 
     HANDLE hFile = nullptr;
     QString archive;
-    if (!openFileFromArchives(norm, alt, (void**)&hFile, &archive))
+    if (!openFileFromArchives(candidates, (void**)&hFile, &archive))
     {
-        LogSink::instance().log(QString("MPQ miss: %1 | tried %2 / %3").arg(path, norm, alt));
+        LogSink::instance().log(QString("MPQ miss: %1").arg(path));
+        if (!archives_.empty())
+        {
+            QStringList mounts;
+            for (const auto& a : archives_)
+                mounts << a.path;
+            LogSink::instance().log(QString("MPQ mounted list: %1").arg(mounts.join("; ")));
+        }
+        if (!candidates.isEmpty())
+            LogSink::instance().log(QString("MPQ tried: %1").arg(candidates.join(" | ")));
         return {};
     }
 
@@ -205,11 +232,10 @@ QByteArray MpqVfs::readAll(const QString& path) const
 
 QString MpqVfs::resolveDebugInfo(const QString& path) const
 {
-    const QString norm = normalizePath(path);
-    const QString alt = norm.toUpper();
+    const QStringList candidates = buildCandidatePaths(path);
     HANDLE hFile = nullptr;
     QString archive;
-    if (openFileFromArchives(norm, alt, (void**)&hFile, &archive))
+    if (openFileFromArchives(candidates, (void**)&hFile, &archive))
     {
         if (hFile)
             SFileCloseFile(hFile);

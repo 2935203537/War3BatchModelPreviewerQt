@@ -56,6 +56,8 @@ private:
     void updateStatusText();
     void recordMissingTexture(const QString& ref, const QStringList& attempts);
     void drawDebug(const QMatrix4x4& mvp);
+    void setGlPhase(const char* phase);
+    void updateSkinning(std::uint32_t globalTimeMs);
 
     GLuint getOrCreateTexture(std::uint32_t textureId);
     struct TextureResolve
@@ -104,15 +106,19 @@ private:
     GLuint ibo_ = 0;
     std::vector<GpuSubmesh> gpuSubmeshes_;
     QHash<QString, GpuCacheEntry> gpuCache_;
+    std::vector<ModelVertex> skinnedVertices_;
 
     QOpenGLShaderProgram program_;
     bool programReady_ = false;
     QOpenGLDebugLogger glLogger_;
     bool glLoggerReady_ = false;
+    QString glPhase_;
     QOpenGLShaderProgram debugProgram_;
     bool debugProgramReady_ = false;
     GLuint debugVao_ = 0;
     GLuint debugVbo_ = 0;
+    GLuint sanityVao_ = 0;
+    GLuint sanityVbo_ = 0;
     struct DebugVertex
     {
         float px, py, pz;
@@ -153,6 +159,7 @@ private:
     // ---- Animation state ----
     float playbackSpeed_ = 1.0f;
     std::uint32_t localTimeMs_ = 0;
+    std::uint32_t lastGlobalTimeMs_ = 0;
     int currentSeq_ = 0; // auto-play sequences[0]
 
     QTimer frameTick_;

@@ -240,6 +240,8 @@ namespace
         std::vector<ModelVertex> vertices;
         std::vector<std::uint32_t> triIndices;
         quint32 materialId = 0;
+        std::vector<std::uint8_t> vertexGroups;
+        std::vector<ModelData::SkinGroup> groups;
     };
 
     static bool parseGeoset(Reader& r, quint32 inclusiveSize, quint32 mdxVersion, GeosetParsed& out, QString* outError)
@@ -349,28 +351,59 @@ namespace
         // GNDX (skip)
         quint32 vertexGroupCount = 0;
         if (!readArrayTagCount(gs, "GNDX", vertexGroupCount, outError)) return false;
-        if (!gs.skip(qsizetype(vertexGroupCount)))
+        out.vertexGroups.resize(vertexGroupCount);
+        for (quint32 i = 0; i < vertexGroupCount; ++i)
         {
-            setErr(outError, "Unexpected EOF skipping GNDX.");
-            return false;
+            unsigned char v = 0;
+            if (!gs.readBytes(&v, 1))
+            {
+                setErr(outError, "Unexpected EOF reading GNDX.");
+                return false;
+            }
+            out.vertexGroups[i] = std::uint8_t(v);
         }
 
-        // MTGC (skip)
+        // MTGC (matrix group sizes)
         quint32 matrixGroupCount = 0;
         if (!readArrayTagCount(gs, "MTGC", matrixGroupCount, outError)) return false;
-        if (!gs.skip(qsizetype(matrixGroupCount) * 4))
+        std::vector<quint32> groupSizes(matrixGroupCount);
+        out.groups.reserve(matrixGroupCount);
+        for (quint32 i = 0; i < matrixGroupCount; ++i)
         {
-            setErr(outError, "Unexpected EOF skipping MTGC.");
-            return false;
+            quint32 sz = 0;
+            if (!gs.readU32(sz))
+            {
+                setErr(outError, "Unexpected EOF reading MTGC.");
+                return false;
+            }
+            groupSizes[i] = sz;
+            out.groups.push_back(ModelData::SkinGroup{});
         }
 
-        // MATS (skip)
+        // MATS (matrix indices)
         quint32 matrixIndexCount = 0;
         if (!readArrayTagCount(gs, "MATS", matrixIndexCount, outError)) return false;
-        if (!gs.skip(qsizetype(matrixIndexCount) * 4))
+        quint32 groupIndex = 0;
+        quint32 remaining = (matrixGroupCount > 0) ? groupSizes[0] : 0;
+        for (quint32 i = 0; i < matrixIndexCount; ++i)
         {
-            setErr(outError, "Unexpected EOF skipping MATS.");
-            return false;
+            qint32 nodeIndex = -1;
+            if (!gs.readI32(nodeIndex))
+            {
+                setErr(outError, "Unexpected EOF reading MATS.");
+                return false;
+            }
+            while (groupIndex < matrixGroupCount && remaining == 0)
+            {
+                groupIndex++;
+                remaining = (groupIndex < matrixGroupCount) ? groupSizes[groupIndex] : 0;
+            }
+            if (groupIndex < out.groups.size())
+            {
+                out.groups[groupIndex].nodeIndices.push_back(nodeIndex);
+                if (remaining > 0)
+                    --remaining;
+            }
         }
 
         // Fixed fields
@@ -749,9 +782,220 @@ namespace
         return true;
     }
 
+    static bool readVec3(Reader& r, Vec3& out)
+    {
+        return r.readF32(out.x) && r.readF32(out.y) && r.readF32(out.z);
+    }
+
+    static bool readVec4(Reader& r, Vec4& out)
+    {
+        return r.readF32(out.x) && r.readF32(out.y) && r.readF32(out.z) && r.readF32(out.w);
+    }
+
+    static bool parseVec3Track(Reader& r, ModelData::MdxTrack<Vec3>& outTrack)
+    {
+        qint32 num = 0, interp = 0, globalSeq = -1;
+        if (!r.readI32(num) || !r.readI32(interp) || !r.readI32(globalSeq))
+            return false;
+        if (num < 0) num = 0;
+
+        outTrack.globalSeqId = globalSeq;
+        outTrack.keys.clear();
+        outTrack.keys.reserve(size_t(num));
+
+        switch (interp)
+        {
+        case 0: outTrack.interp = ModelData::MdxInterp::None; break;
+        case 1: outTrack.interp = ModelData::MdxInterp::Linear; break;
+        case 2: outTrack.interp = ModelData::MdxInterp::Hermite; break;
+        case 3: outTrack.interp = ModelData::MdxInterp::Bezier; break;
+        default: outTrack.interp = ModelData::MdxInterp::None; break;
+        }
+
+        for (qint32 i = 0; i < num; ++i)
+        {
+            qint32 t = 0;
+            Vec3 v{};
+            if (!r.readI32(t) || !readVec3(r, v))
+                return false;
+            ModelData::MdxTrackKey<Vec3> k;
+            k.timeMs = (t < 0) ? 0u : std::uint32_t(t);
+            k.value = v;
+            if (interp >= 2)
+            {
+                Vec3 inT{}, outT{};
+                if (!readVec3(r, inT) || !readVec3(r, outT))
+                    return false;
+                k.inTan = inT;
+                k.outTan = outT;
+            }
+            outTrack.keys.push_back(k);
+        }
+        return true;
+    }
+
+    static bool parseVec4Track(Reader& r, ModelData::MdxTrack<Vec4>& outTrack)
+    {
+        qint32 num = 0, interp = 0, globalSeq = -1;
+        if (!r.readI32(num) || !r.readI32(interp) || !r.readI32(globalSeq))
+            return false;
+        if (num < 0) num = 0;
+
+        outTrack.globalSeqId = globalSeq;
+        outTrack.keys.clear();
+        outTrack.keys.reserve(size_t(num));
+
+        switch (interp)
+        {
+        case 0: outTrack.interp = ModelData::MdxInterp::None; break;
+        case 1: outTrack.interp = ModelData::MdxInterp::Linear; break;
+        case 2: outTrack.interp = ModelData::MdxInterp::Hermite; break;
+        case 3: outTrack.interp = ModelData::MdxInterp::Bezier; break;
+        default: outTrack.interp = ModelData::MdxInterp::None; break;
+        }
+
+        for (qint32 i = 0; i < num; ++i)
+        {
+            qint32 t = 0;
+            Vec4 v{};
+            if (!r.readI32(t) || !readVec4(r, v))
+                return false;
+            ModelData::MdxTrackKey<Vec4> k;
+            k.timeMs = (t < 0) ? 0u : std::uint32_t(t);
+            k.value = v;
+            if (interp >= 2)
+            {
+                Vec4 inT{}, outT{};
+                if (!readVec4(r, inT) || !readVec4(r, outT))
+                    return false;
+                k.inTan = inT;
+                k.outTan = outT;
+            }
+            outTrack.keys.push_back(k);
+        }
+        return true;
+    }
+
+    static bool parseNodeBlock(Reader& r, ModelData::Node& outNode, QString* outError)
+    {
+        const qsizetype start = r.pos;
+        quint32 size = 0;
+        if (!r.readU32(size))
+        {
+            setErr(outError, "Unexpected EOF reading node size.");
+            return false;
+        }
+        if (size < 96 || !r.canRead(qsizetype(size) - 4))
+        {
+            setErr(outError, "Invalid node size.");
+            return false;
+        }
+        const qsizetype end = start + qsizetype(size);
+
+        outNode.name = readFixedString(r, 80);
+        qint32 nodeId = -1;
+        qint32 parentId = -1;
+        quint32 flags = 0;
+        if (!r.readI32(nodeId) || !r.readI32(parentId) || !r.readU32(flags))
+        {
+            setErr(outError, "Unexpected EOF reading node header.");
+            return false;
+        }
+        outNode.nodeId = nodeId;
+        outNode.parentId = parentId;
+        outNode.flags = flags;
+
+        while (r.pos + 4 <= end)
+        {
+            char tag[4] = {};
+            if (!r.readTag(tag))
+                break;
+            if (tagEq(tag, "KGTR"))
+            {
+                if (!parseVec3Track(r, outNode.trackTranslation))
+                    break;
+            }
+            else if (tagEq(tag, "KGRT"))
+            {
+                if (!parseVec4Track(r, outNode.trackRotation))
+                    break;
+            }
+            else if (tagEq(tag, "KGSC"))
+            {
+                if (!parseVec3Track(r, outNode.trackScaling))
+                    break;
+            }
+            else
+            {
+                LogSink::instance().log(QString("Unknown node track tag: %1%2%3%4")
+                                            .arg(QChar(tag[0])).arg(QChar(tag[1]))
+                                            .arg(QChar(tag[2])).arg(QChar(tag[3])));
+                break;
+            }
+        }
+
+        r.pos = end;
+        return true;
+    }
+
+    static void storeNode(ModelData& model, ModelData::Node&& node)
+    {
+        if (node.nodeId < 0)
+            return;
+        const std::size_t idx = std::size_t(node.nodeId);
+        if (model.nodes.size() <= idx)
+            model.nodes.resize(idx + 1);
+        model.nodes[idx] = std::move(node);
+    }
+
+    static bool parseBones(Reader& r, quint32 chunkSize, ModelData& model, QString* outError)
+    {
+        const qsizetype startPos = r.pos;
+        const qsizetype endPos = startPos + qsizetype(chunkSize);
+        while (r.pos + 4 <= endPos)
+        {
+            ModelData::Node node;
+            if (!parseNodeBlock(r, node, outError))
+            {
+                r.pos = endPos;
+                return false;
+            }
+            qint32 geosetId = -1;
+            qint32 geoAnimId = -1;
+            if (!r.readI32(geosetId) || !r.readI32(geoAnimId))
+            {
+                setErr(outError, "Unexpected EOF reading bone fields.");
+                r.pos = endPos;
+                return false;
+            }
+            Q_UNUSED(geosetId);
+            Q_UNUSED(geoAnimId);
+            storeNode(model, std::move(node));
+        }
+        r.pos = startPos + qsizetype(chunkSize);
+        return true;
+    }
+
+    static bool parseHelpers(Reader& r, quint32 chunkSize, ModelData& model, QString* outError)
+    {
+        const qsizetype startPos = r.pos;
+        const qsizetype endPos = startPos + qsizetype(chunkSize);
+        while (r.pos + 4 <= endPos)
+        {
+            ModelData::Node node;
+            if (!parseNodeBlock(r, node, outError))
+            {
+                r.pos = endPos;
+                return false;
+            }
+            storeNode(model, std::move(node));
+        }
+        r.pos = startPos + qsizetype(chunkSize);
+        return true;
+    }
+
     static bool parsePRE2(Reader& r, quint32 chunkSize, ModelData& model, QString* outError)
     {
-        Q_UNUSED(outError);
         const qsizetype startPos = r.pos;
         const qsizetype endPos = startPos + qsizetype(chunkSize);
         while (r.pos + 4 <= endPos)
@@ -769,24 +1013,19 @@ namespace
             orr.size = qsizetype(objectSize);
             orr.pos = 4; // we already consumed objectSize
 
-            quint32 genericSize = 0;
-            if (!orr.readU32(genericSize)) { r.pos = objEnd; continue; }
+            ModelData::Node node;
+            if (!parseNodeBlock(orr, node, outError))
+            {
+                r.pos = objEnd;
+                continue;
+            }
 
             ModelData::ParticleEmitter2 e;
-            e.name = readFixedString(orr, 80);
-            qint32 oid = -1, pid = -1;
-            quint32 flags = 0;
-            if (!orr.readI32(oid) || !orr.readI32(pid) || !orr.readU32(flags)) { r.pos = objEnd; continue; }
-            e.objectId = oid;
-            e.parentId = pid;
-            e.flags = flags;
-
-            // Generic object may include additional bytes (animations) up to genericSize.
-            // Base consumed after genericSize field: 80+4+4+4 = 92
-            const qint64 genericConsumed = 92;
-            const qint64 genericRemain = qint64(genericSize) - genericConsumed;
-            if (genericRemain > 0)
-                orr.skip(qsizetype(std::min<qint64>(genericRemain, (qint64)orr.size - (qint64)orr.pos)));
+            e.name = node.name;
+            e.objectId = node.nodeId;
+            e.parentId = node.parentId;
+            e.flags = node.flags;
+            storeNode(model, std::move(node));
 
             // Emitter2 fields
             if (!orr.readF32(e.speed) || !orr.readF32(e.variation) || !orr.readF32(e.latitude) ||
@@ -824,28 +1063,28 @@ namespace
             e.textureId = texId;
 
             // Parse remaining sub-chunks inside this object (animation tracks)
-            while (orr.pos + 8 <= orr.size)
+            while (orr.pos + 4 <= orr.size)
             {
                 char t[4] = {};
-                quint32 sz = 0;
                 if (!orr.peekTag(t)) break;
                 if (!std::isalpha((unsigned char)t[0])) break;
-                if (!orr.readTag(t) || !orr.readU32(sz)) break;
-                if (!orr.canRead(qsizetype(sz))) break;
+                if (!orr.readTag(t)) break;
 
-                Reader tr;
-                tr.data = orr.data + orr.pos;
-                tr.size = qsizetype(sz);
-                tr.pos = 0;
-
-                if (tagEq(t, "KP2S")) parseFloatTrack(tr, sz, e.trackSpeed);
-                else if (tagEq(t, "KP2R")) parseFloatTrack(tr, sz, e.trackVariation);
-                else if (tagEq(t, "KP2L")) parseFloatTrack(tr, sz, e.trackLatitude);
-                else if (tagEq(t, "KP2G")) parseFloatTrack(tr, sz, e.trackGravity);
-                else if (tagEq(t, "KP2E")) parseFloatTrack(tr, sz, e.trackEmissionRate);
-                else if (tagEq(t, "KP2V")) parseFloatTrack(tr, sz, e.trackVisibility);
-
-                orr.pos += qsizetype(sz);
+                if (tagEq(t, "KP2S")) { if (!parseFloatTrack(orr, 0, e.trackSpeed)) break; }
+                else if (tagEq(t, "KP2R")) { if (!parseFloatTrack(orr, 0, e.trackVariation)) break; }
+                else if (tagEq(t, "KP2L")) { if (!parseFloatTrack(orr, 0, e.trackLatitude)) break; }
+                else if (tagEq(t, "KP2G")) { if (!parseFloatTrack(orr, 0, e.trackGravity)) break; }
+                else if (tagEq(t, "KP2E")) { if (!parseFloatTrack(orr, 0, e.trackEmissionRate)) break; }
+                else if (tagEq(t, "KP2W")) { if (!parseFloatTrack(orr, 0, e.trackWidth)) break; }
+                else if (tagEq(t, "KP2N")) { if (!parseFloatTrack(orr, 0, e.trackLength)) break; }
+                else if (tagEq(t, "KP2V")) { if (!parseFloatTrack(orr, 0, e.trackVisibility)) break; }
+                else
+                {
+                    LogSink::instance().log(QString("Unknown PRE2 track tag: %1%2%3%4")
+                                                .arg(QChar(t[0])).arg(QChar(t[1]))
+                                                .arg(QChar(t[2])).arg(QChar(t[3])));
+                    break;
+                }
             }
 
             model.emitters2.push_back(std::move(e));
@@ -855,6 +1094,34 @@ namespace
         }
 
         // ensure r.pos at end of chunk
+        r.pos = startPos + qsizetype(chunkSize);
+        return true;
+    }
+
+    static bool parseNodeChunkObject(Reader& r, quint32 chunkSize, ModelData& model, QString* outError)
+    {
+        const qsizetype startPos = r.pos;
+        const qsizetype endPos = startPos + qsizetype(chunkSize);
+        while (r.pos + 4 <= endPos)
+        {
+            quint32 objectSize = 0;
+            if (!r.readU32(objectSize)) break;
+            if (objectSize < 8) break;
+            const qsizetype objStart = r.pos - 4;
+            const qsizetype objEnd = objStart + qsizetype(objectSize);
+            if (objEnd > endPos) break;
+
+            Reader orr;
+            orr.data = r.data + objStart;
+            orr.size = qsizetype(objectSize);
+            orr.pos = 4;
+
+            ModelData::Node node;
+            if (parseNodeBlock(orr, node, outError))
+                storeNode(model, std::move(node));
+
+            r.pos = objEnd;
+        }
         r.pos = startPos + qsizetype(chunkSize);
         return true;
     }
@@ -953,6 +1220,26 @@ namespace MdxLoader
                     // Append vertices
                     model.vertices.insert(model.vertices.end(), gs.vertices.begin(), gs.vertices.end());
 
+                    if (!gs.vertexGroups.empty())
+                    {
+                        const std::size_t groupOffset = model.skinGroups.size();
+                        for (auto& g : gs.groups)
+                            model.skinGroups.push_back(std::move(g));
+
+                        const std::size_t vgCount = std::min(gs.vertexGroups.size(), gs.vertices.size());
+                        model.vertexGroups.reserve(model.vertexGroups.size() + gs.vertices.size());
+                        for (std::size_t i = 0; i < vgCount; ++i)
+                        {
+                            const std::uint16_t gid = static_cast<std::uint16_t>(groupOffset + gs.vertexGroups[i]);
+                            model.vertexGroups.push_back(gid);
+                        }
+                        for (std::size_t i = vgCount; i < gs.vertices.size(); ++i)
+                        {
+                            const std::uint16_t gid = static_cast<std::uint16_t>(groupOffset);
+                            model.vertexGroups.push_back(gid);
+                        }
+                    }
+
                     // Append indices with baseVertex offset
                     for (std::uint32_t idx : gs.triIndices)
                         model.indices.push_back(baseVertex + idx);
@@ -976,6 +1263,22 @@ namespace MdxLoader
                 if (!parseGlobalSequences(cr, chunkSize, model, outError))
                     return std::nullopt;
             }
+            else if (tagEq(tag, "BONE"))
+            {
+                if (!parseBones(cr, chunkSize, model, outError))
+                    return std::nullopt;
+            }
+            else if (tagEq(tag, "HELP"))
+            {
+                if (!parseHelpers(cr, chunkSize, model, outError))
+                    return std::nullopt;
+            }
+            else if (tagEq(tag, "LITE") || tagEq(tag, "ATCH") || tagEq(tag, "PREM") ||
+                     tagEq(tag, "RIBB") || tagEq(tag, "EVTS") || tagEq(tag, "CLID"))
+            {
+                if (!parseNodeChunkObject(cr, chunkSize, model, outError))
+                    return std::nullopt;
+            }
             else if (tagEq(tag, "PIVT"))
             {
                 if (!parsePivots(cr, chunkSize, model, outError))
@@ -993,6 +1296,21 @@ namespace MdxLoader
 
         if (!chunkTags.isEmpty())
             LogSink::instance().log(QString("MDX chunks: %1").arg(chunkTags.join(", ")));
+
+        if (!model.pivots.empty())
+        {
+            if (model.nodes.size() < model.pivots.size())
+                model.nodes.resize(model.pivots.size());
+            for (std::size_t i = 0; i < model.pivots.size(); ++i)
+            {
+                auto& n = model.nodes[i];
+                if (n.nodeId < 0)
+                    n.nodeId = static_cast<std::int32_t>(i);
+                n.pivot = Vec3{model.pivots[i].x, model.pivots[i].y, model.pivots[i].z};
+            }
+        }
+
+        model.bindVertices = model.vertices;
 
         const bool hasMesh = !model.vertices.empty() && !model.indices.empty();
         const bool hasParticles = !model.emitters2.empty();
