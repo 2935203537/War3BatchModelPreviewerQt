@@ -11,7 +11,14 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 # Qt6 is recommended (MSVC 2022 kit). Set CMAKE_PREFIX_PATH to your Qt install, e.g.:
 #   -DCMAKE_PREFIX_PATH="C:/Qt/6.6.2/msvc2019_64"
-find_package(Qt6 6.2 REQUIRED COMPONENTS Widgets OpenGLWidgets Concurrent)
+set(QT_MIN_VERSION 6.2)
+
+# Tip for Visual Studio CMake: pass -DQT6_ROOT=... or set Qt6_DIR/CMAKE_PREFIX_PATH
+if(DEFINED QT6_ROOT)
+  list(PREPEND CMAKE_PREFIX_PATH "${QT6_ROOT}")
+endif()
+
+find_package(Qt6 ${QT_MIN_VERSION} REQUIRED COMPONENTS Widgets OpenGLWidgets Concurrent)
 
 qt_standard_project_setup()
 
@@ -24,6 +31,8 @@ set(SOURCES
     src/MdxLoader.cpp
     src/MdxLoader.h
     src/ModelData.h
+    src/BlpLoader.cpp
+    src/BlpLoader.h
 )
 
 qt_add_executable(War3BatchModelPreviewerQt

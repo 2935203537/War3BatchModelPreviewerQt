@@ -1,16 +1,15 @@
 #pragma once
-#include <QString>
-#include <optional>
 
+#include <optional>
+#include <QString>
 #include "ModelData.h"
 
-// Minimal Warcraft III MDX mesh loader.
-// - Loads the first geoset's vertices and triangle indices.
-// - Attempts to read normals; otherwise computes normals.
-// - Ignores textures/materials/bones/animations.
+// Minimal Warcraft III MDX (binary) loader.
+// Focus: enough geometry/material data to render a static preview.
 
-class MdxLoader
+namespace MdxLoader
 {
-public:
-    static std::optional<ModelData> LoadFromFile(const QString& filePath, QString* outError);
-};
+    // Loads an .mdx file from disk.
+    // On failure returns std::nullopt and (optionally) fills outError.
+    std::optional<ModelData> LoadFromFile(const QString& filePath, QString* outError = nullptr);
+}

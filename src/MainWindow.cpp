@@ -146,6 +146,7 @@ void MainWindow::chooseFolder()
 void MainWindow::startScanFolder(const QString& folder)
 {
     currentFolder_ = folder;
+    viewer_->setAssetRoot(currentFolder_);
     lblFolder_->setText(folder);
     lblStatus_->setText("Scanning for .mdx files...");
 

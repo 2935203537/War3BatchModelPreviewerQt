@@ -1,10 +1,12 @@
 #pragma once
+
 #include <QOpenGLWidget>
 #include <QOpenGLFunctions_3_3_Core>
-#include <QMatrix4x4>
-#include <QPoint>
+#include <QOpenGLShaderProgram>
 #include <QVector3D>
+#include <QMatrix4x4>
 #include <optional>
+#include <unordered_map>
 
 #include "ModelData.h"
 
@@ -15,8 +17,8 @@ public:
     explicit GLModelView(QWidget* parent = nullptr);
     ~GLModelView() override;
 
-    void setModel(const std::optional<ModelData>& model, const QString& label);
-    void frameModel();
+    void setModel(std::optional<ModelData> model, const QString& displayName);
+    void setAssetRoot(const QString& assetRoot);
 
 signals:
     void statusTextChanged(const QString& text);
@@ -29,38 +31,54 @@ protected:
     void mousePressEvent(QMouseEvent* e) override;
     void mouseMoveEvent(QMouseEvent* e) override;
     void wheelEvent(QWheelEvent* e) override;
-    void keyPressEvent(QKeyEvent* e) override;
 
 private:
-    void destroyGlObjects();
-    void ensureGpuBuffers();
-    void updateStatus();
+    void rebuildGpuBuffers();
+    void clearGpuResources();
 
-    struct Camera
+    GLuint getOrCreateTexture(std::uint32_t textureId);
+    QString resolveTexturePath(const std::string& mdxPath) const;
+    GLuint createPlaceholderTexture();
+
+    struct GpuSubmesh
     {
-        float yaw = 45.0f;
-        float pitch = 25.0f;
-        float distance = 200.0f;
-        QVector3D target = QVector3D(0, 0, 0);
-    } cam_;
+        std::uint32_t indexOffset = 0;
+        std::uint32_t indexCount = 0;
+        std::uint32_t materialId = 0;
+    };
 
-    QPoint lastMousePos_;
-    bool leftDown_ = false;
-    bool rightDown_ = false;
-
-    // GL objects
-    unsigned int vao_ = 0;
-    unsigned int vbo_ = 0;
-    unsigned int ebo_ = 0;
-    unsigned int prog_ = 0;
-
-    int locMvp_ = -1;
-    int locModel_ = -1;
-    int locLightDir_ = -1;
+    struct TextureHandle
+    {
+        GLuint id = 0;
+        bool valid = false;
+    };
 
     std::optional<ModelData> model_;
-    QString label_;
-    bool gpuDirty_ = true;
+    QString displayName_;
+    QString assetRoot_;
 
-    QMatrix4x4 projection_;
+    // GPU resources
+    GLuint vao_ = 0;
+    GLuint vbo_ = 0;
+    GLuint ibo_ = 0;
+    std::vector<GpuSubmesh> gpuSubmeshes_;
+
+    QOpenGLShaderProgram program_;
+    bool programReady_ = false;
+
+    std::unordered_map<std::uint32_t, TextureHandle> textureCache_;
+    GLuint placeholderTex_ = 0;
+
+    // Camera controls
+    QPoint lastMouse_;
+    float yaw_ = 30.0f;
+    float pitch_ = -25.0f;
+    float distance_ = 6.0f;
+
+    // Model framing
+    QVector3D modelCenter_{0,0,0};
+    float modelRadius_ = 1.0f;
+
+    // Cached matrices
+    QMatrix4x4 proj_;
 };
