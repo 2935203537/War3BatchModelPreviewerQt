@@ -31,6 +31,7 @@ public:
     void setBackgroundAlpha(float alpha);
     void setCameraAngles(float yaw, float pitch, float roll);
     void setCameraPan(float x, float y, float z);
+    void dumpCpuSkinCheck(const QString& outPath, int geosetIndex = 0);
 
     // Animation / playback
     // Default = 1.0; clamped to [0.05, 10.0]

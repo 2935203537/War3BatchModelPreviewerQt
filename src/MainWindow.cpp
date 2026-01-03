@@ -1002,6 +1002,13 @@ void MainWindow::exportDiagnostics()
                 const QString mdlOut = QDir(diagDir).filePath(QString("%1_from_mdx.mdl")
                                                                   .arg(QFileInfo(selectedPath).completeBaseName()));
                 writeMdxAsMdl(*model, mdlOut, QFileInfo(selectedPath).fileName());
+
+                if (viewer_)
+                {
+                    const QString skinOut = QDir(diagDir).filePath(QString("%1_cpu_skin_check.txt")
+                                                                       .arg(QFileInfo(selectedPath).completeBaseName()));
+                    viewer_->dumpCpuSkinCheck(skinOut, 0);
+                }
             }
         }
     }
