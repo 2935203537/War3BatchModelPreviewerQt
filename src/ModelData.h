@@ -135,8 +135,8 @@ struct ModelData
     {
         std::string name;
         std::string type; // e.g. BONE/HELP/ATCH/CLID/PRE2
-        std::int32_t nodeId = -1;
-        std::int32_t parentId = -1;
+        std::int32_t objectId = -1;
+        std::int32_t parentId = -1; // Parent ObjectId
         std::uint32_t flags = 0;
         Vec3 pivot;
         MdxTrack<Vec3> trackTranslation;
@@ -144,8 +144,11 @@ struct ModelData
         MdxTrack<Vec3> trackScaling;
     };
 
-    std::vector<Node> nodes; // indexed by nodeId when possible
-    std::vector<std::int32_t> boneNodeIds; // BONE chunk order -> nodeId
+    std::vector<Node> nodes; // all nodes (bone/help/atch/etc)
+    std::vector<int> nodeIdToIndex; // size = maxObjectId+1, -1 if missing
+    int nodeCount = 0;
+    int maxObjectId = -1;
+    std::vector<std::int32_t> boneNodeIds; // BONE chunk order -> objectId
 
     struct SkinGroup
     {

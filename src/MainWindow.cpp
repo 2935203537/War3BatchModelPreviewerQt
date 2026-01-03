@@ -282,7 +282,7 @@ namespace
 
                 const QString nodeName = QString::fromStdString(n.name);
                 ts << type << " \"" << nodeName << "\" {\n";
-                ts << "\tObjectId " << n.nodeId << ",\n";
+                ts << "\tObjectId " << n.objectId << ",\n";
                 if (n.parentId >= 0)
                     ts << "\tParent " << n.parentId << ",\n";
                 ts << "\tPivotPoint { " << n.pivot.x << ", " << n.pivot.y << ", " << n.pivot.z << " },\n";
@@ -999,24 +999,9 @@ void MainWindow::exportDiagnostics()
                     for (std::size_t g = 0; g < gd.expandedGroups.size(); ++g)
                         ts << "  [" << g << "] {" << joinI32(gd.expandedGroups[g]) << "}\n";
 
-                    // Interpret expanded groups as bone indices (BONE chunk order) and resolve to node ids.
-                    if (!model->boneNodeIds.empty())
-                    {
-                        ts << "Expanded groups resolved (boneIndex->nodeId):\n";
-                        for (std::size_t g = 0; g < gd.expandedGroups.size(); ++g)
-                        {
-                            QStringList out;
-                            out.reserve(int(gd.expandedGroups[g].size()));
-                            for (auto bi : gd.expandedGroups[g])
-                            {
-                                if (bi >= 0 && std::size_t(bi) < model->boneNodeIds.size())
-                                    out << QString::number(model->boneNodeIds[std::size_t(bi)]);
-                                else
-                                    out << QString::number(bi);
-                            }
-                            ts << "  [" << g << "] {" << out.join(", ") << "}\n";
-                        }
-                    }
+                    ts << "Expanded groups (nodeIds):\n";
+                    for (std::size_t g = 0; g < gd.expandedGroups.size(); ++g)
+                        ts << "  [" << g << "] {" << joinI32(gd.expandedGroups[g]) << "}\n";
                 }
 
                 for (std::uint16_t gid : model->vertexGroups)
@@ -1034,12 +1019,20 @@ void MainWindow::exportDiagnostics()
                     ts << "  group " << it.key() << ": " << it.value() << "\n";
 
                 ts << "\nobjectsById (type/name/parent/pivot):\n";
-                for (std::size_t i = 0; i < model->nodes.size(); ++i)
+                for (int objectId = 0; objectId <= model->maxObjectId; ++objectId)
                 {
-                    const auto& n = model->nodes[i];
+                    if (objectId < 0 || objectId >= static_cast<int>(model->nodeIdToIndex.size()))
+                        continue;
+                    const int idx = model->nodeIdToIndex[objectId];
+                    if (idx < 0 || static_cast<std::size_t>(idx) >= model->nodes.size())
+                    {
+                        ts << "  [" << objectId << "] <missing>\n";
+                        continue;
+                    }
+                    const auto& n = model->nodes[std::size_t(idx)];
                     const QString type = n.type.empty() ? "NODE" : QString::fromStdString(n.type);
                     const QString name = QString::fromStdString(n.name);
-                    ts << "  [" << i << "] " << type << " | " << name
+                    ts << "  [" << objectId << "] " << type << " | " << name
                        << " | parent=" << n.parentId
                        << " | pivot=(" << n.pivot.x << ", " << n.pivot.y << ", " << n.pivot.z << ")\n";
                 }

@@ -947,15 +947,15 @@ namespace
         const qsizetype end = start + qsizetype(size);
 
         outNode.name = readFixedString(r, 80);
-        qint32 nodeId = -1;
+        qint32 objectId = -1;
         qint32 parentId = -1;
         quint32 flags = 0;
-        if (!r.readI32(nodeId) || !r.readI32(parentId) || !r.readU32(flags))
+        if (!r.readI32(objectId) || !r.readI32(parentId) || !r.readU32(flags))
         {
             setErr(outError, "Unexpected EOF reading node header.");
             return false;
         }
-        outNode.nodeId = nodeId;
+        outNode.objectId = objectId;
         outNode.parentId = parentId;
         outNode.flags = flags;
 
@@ -994,12 +994,9 @@ namespace
 
     static void storeNode(ModelData& model, ModelData::Node&& node)
     {
-        if (node.nodeId < 0)
+        if (node.objectId < 0)
             return;
-        const std::size_t idx = std::size_t(node.nodeId);
-        if (model.nodes.size() <= idx)
-            model.nodes.resize(idx + 1);
-        model.nodes[idx] = std::move(node);
+        model.nodes.push_back(std::move(node));
     }
 
     static bool parseBones(Reader& r, quint32 chunkSize, ModelData& model, QString* outError)
@@ -1025,8 +1022,8 @@ namespace
             }
             Q_UNUSED(geosetId);
             Q_UNUSED(geoAnimId);
-            if (node.nodeId >= 0)
-                model.boneNodeIds.push_back(node.nodeId);
+            if (node.objectId >= 0)
+                model.boneNodeIds.push_back(node.objectId);
             storeNode(model, std::move(node));
         }
         r.pos = startPos + qsizetype(chunkSize);
@@ -1081,7 +1078,7 @@ namespace
 
             ModelData::ParticleEmitter2 e;
             e.name = node.name;
-            e.objectId = node.nodeId;
+            e.objectId = node.objectId;
             e.parentId = node.parentId;
             e.flags = node.flags;
             storeNode(model, std::move(node));
@@ -1490,16 +1487,39 @@ namespace MdxLoader
         if (!chunkTags.isEmpty())
             LogSink::instance().log(QString("MDX chunks: %1").arg(chunkTags.join(", ")));
 
+        // Build nodeIdToIndex map and maxObjectId.
+        model.maxObjectId = -1;
+        for (const auto& n : model.nodes)
+            model.maxObjectId = std::max(model.maxObjectId, n.objectId);
+        model.nodeCount = static_cast<int>(model.nodes.size());
+
+        model.nodeIdToIndex.assign(std::max(0, model.maxObjectId + 1), -1);
+        for (std::size_t i = 0; i < model.nodes.size(); ++i)
+        {
+            const int objectId = model.nodes[i].objectId;
+            if (objectId < 0)
+                continue;
+            if (objectId >= static_cast<int>(model.nodeIdToIndex.size()))
+                continue;
+            if (model.nodeIdToIndex[objectId] != -1)
+            {
+                LogSink::instance().log(QString("Duplicate objectId=%1 (keeping first).").arg(objectId));
+                continue;
+            }
+            model.nodeIdToIndex[objectId] = static_cast<int>(i);
+        }
+
         if (!model.pivots.empty())
         {
-            if (model.nodes.size() < model.pivots.size())
-                model.nodes.resize(model.pivots.size());
             for (std::size_t i = 0; i < model.pivots.size(); ++i)
             {
-                auto& n = model.nodes[i];
-                if (n.nodeId < 0)
-                    n.nodeId = static_cast<std::int32_t>(i);
-                n.pivot = Vec3{model.pivots[i].x, model.pivots[i].y, model.pivots[i].z};
+                if (i >= static_cast<std::size_t>(model.nodeIdToIndex.size()))
+                    break;
+                const int idx = model.nodeIdToIndex[static_cast<int>(i)];
+                if (idx < 0 || static_cast<std::size_t>(idx) >= model.nodes.size())
+                    continue;
+                model.nodes[static_cast<std::size_t>(idx)].pivot =
+                    Vec3{model.pivots[i].x, model.pivots[i].y, model.pivots[i].z};
             }
         }
 

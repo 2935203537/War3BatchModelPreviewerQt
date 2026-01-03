@@ -67,6 +67,7 @@ private:
     void drawDebug(const QMatrix4x4& mvp);
     void setGlPhase(const char* phase);
     void updateSkinning(std::uint32_t globalTimeMs);
+    void computeNodeWorld(std::uint32_t globalTimeMs, std::vector<QMatrix4x4>& outWorld) const;
     void buildNodeWorldCached(std::uint32_t globalTimeMs);
     void invalidateBindCache();
     void ensureBindCache();
@@ -184,8 +185,7 @@ private:
 
     // --- Skinning bind-pose cache (invBind) ---
     int bindCacheSeq_ = -1;
-    std::vector<QMatrix4x4> invBindNodes_; // size = nodeWorldMat_.size()
-    std::vector<QMatrix4x4> invBindBones_; // size = model_->boneNodeIds.size()
+    std::vector<QMatrix4x4> invBindByNodeId_; // size = maxObjectId+1
 
     // ---- Animation state ----
     float playbackSpeed_ = 1.0f;
