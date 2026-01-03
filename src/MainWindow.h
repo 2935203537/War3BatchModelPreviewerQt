@@ -16,6 +16,8 @@ class QLabel;
 class QPushButton;
 class QSlider;
 class QDoubleSpinBox;
+class QComboBox;
+class QCheckBox;
 class QDockWidget;
 class QPlainTextEdit;
 class QTabWidget;
@@ -71,6 +73,8 @@ private:
     QLabel* statusLabel_ = nullptr;
     QSlider* speedSlider_ = nullptr;
     QSlider* bgAlphaSlider_ = nullptr;
+    QComboBox* animCombo_ = nullptr;
+    QCheckBox* forceParticleCheck_ = nullptr;
     QDoubleSpinBox* yawSpin_ = nullptr;
     QDoubleSpinBox* pitchSpin_ = nullptr;
     QDoubleSpinBox* rollSpin_ = nullptr;

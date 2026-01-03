@@ -21,13 +21,46 @@ struct ModelTexture
     std::uint32_t flags = 0;
 };
 
+// Small helper vector type used by the particle system.
+struct Vec3 { float x=0, y=0, z=0; };
+struct Vec4 { float x=0, y=0, z=0, w=1; };
+
+// ---- MDX animation track ----
+enum class MdxInterp : std::int32_t
+{
+    None = 0,
+    Linear = 1,
+    Hermite = 2,
+    Bezier = 3,
+};
+
+template<typename T>
+struct MdxTrackKey
+{
+    std::uint32_t timeMs = 0;
+    T value{};
+    T inTan{};
+    T outTan{};
+};
+
+template<typename T>
+struct MdxTrack
+{
+    MdxInterp interp = MdxInterp::None;
+    std::int32_t globalSeqId = -1;
+    std::vector<MdxTrackKey<T>> keys;
+    bool empty() const { return keys.empty(); }
+};
+
 struct ModelLayer
 {
     std::uint32_t filterMode = 0;    // see MDX spec (0..6)
     std::uint32_t shadingFlags = 0;  // bitfield
     std::uint32_t textureId = 0;     // index into ModelData::textures
+    std::int32_t textureAnimId = -1; // index into ModelData::textureAnimations
     std::uint32_t coordId = 0;       // UV set (we currently use set 0 only)
     float alpha = 1.0f;
+    MdxTrack<float> trackAlpha;      // KMTA
 };
 
 struct ModelMaterial
@@ -43,11 +76,8 @@ struct SubMesh
     std::uint32_t indexOffset = 0; // into ModelData::indices
     std::uint32_t indexCount = 0;
     std::uint32_t materialId = 0; // index into ModelData::materials
+    std::uint32_t geosetIndex = 0;
 };
-
-// Small helper vector type used by the particle system.
-struct Vec3 { float x=0, y=0, z=0; };
-struct Vec4 { float x=0, y=0, z=0, w=1; };
 
 struct ModelData
 {
@@ -59,6 +89,14 @@ struct ModelData
 
     std::vector<ModelTexture> textures;
     std::vector<ModelMaterial> materials;
+
+    struct TextureAnimation
+    {
+        MdxTrack<Vec3> translation; // KTAT
+        MdxTrack<Vec4> rotation;    // KTAR
+        MdxTrack<Vec3> scaling;     // KTAS
+    };
+    std::vector<TextureAnimation> textureAnimations;
 
     float boundsMin[3] = {0, 0, 0};
     float boundsMax[3] = {0, 0, 0};
@@ -86,32 +124,11 @@ struct ModelData
     };
     std::vector<Pivot> pivots;
 
-    // ---- MDX animation track ----
-    enum class MdxInterp : std::int32_t
-    {
-        None = 0,
-        Linear = 1,
-        Hermite = 2,
-        Bezier = 3,
-    };
-
+    using MdxInterp = ::MdxInterp;
     template<typename T>
-    struct MdxTrackKey
-    {
-        std::uint32_t timeMs = 0;
-        T value{};
-        T inTan{};
-        T outTan{};
-    };
-
+    using MdxTrackKey = ::MdxTrackKey<T>;
     template<typename T>
-    struct MdxTrack
-    {
-        MdxInterp interp = MdxInterp::None;
-        std::int32_t globalSeqId = -1;
-        std::vector<MdxTrackKey<T>> keys;
-        bool empty() const { return keys.empty(); }
-    };
+    using MdxTrack = ::MdxTrack<T>;
 
     // ---- Nodes (BONE/HELP/...) ----
     struct Node
@@ -152,6 +169,17 @@ struct ModelData
         std::uint32_t indexCount = 0;
     };
     std::vector<GeosetDiagnostics> geosetDiagnostics;
+
+    struct GeosetAnimation
+    {
+        float alpha = 1.0f;
+        std::uint32_t flags = 0;
+        Vec3 color = {1.0f, 1.0f, 1.0f};
+        std::int32_t geosetId = -1;
+        MdxTrack<float> trackAlpha; // KGAO
+        MdxTrack<Vec3> trackColor;  // KGAC
+    };
+    std::vector<GeosetAnimation> geosetAnimations;
 
     struct ParticleEmitter2
     {

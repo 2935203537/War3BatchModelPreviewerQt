@@ -132,6 +132,9 @@ namespace
         return true;
     }
 
+    static bool parseFloatTrack(Reader& r, quint32 chunkSize, ModelData::MdxTrack<float>& outTrack);
+    static bool parseVec3Track(Reader& r, ModelData::MdxTrack<Vec3>& outTrack);
+
     static quint32 indexCountToPrimitiveCount(quint32 d3dPrimitiveType, quint32 indexCount)
     {
         // MDX PCNT stores index counts per group (see MdxLib).
@@ -438,7 +441,8 @@ namespace
 
         // Fixed fields
         quint32 materialId = 0, selectionFlags = 0, selectionGroup = 0;
-        if (!gs.readU32(materialId) || !gs.readU32(selectionFlags) || !gs.readU32(selectionGroup))
+        if (!gs.readU32(materialId) || !gs.readU32(selectionFlags) ||
+            !gs.readU32(selectionGroup))
         {
             setErr(outError, "Unexpected EOF reading geoset header fields.");
             return false;
@@ -642,8 +646,8 @@ namespace
 
                 // Base fields
                 ModelLayer layer;
-                quint32 shadingFlags = 0, filterMode = 0;
-                if (!mr.readU32(shadingFlags) || !mr.readU32(filterMode))
+                quint32 filterMode = 0, shadingFlags = 0;
+                if (!mr.readU32(filterMode) || !mr.readU32(shadingFlags))
                 {
                     setErr(outError, "Unexpected EOF reading layer header.");
                     return false;
@@ -663,26 +667,46 @@ namespace
                     }
                 }
 
-                quint32 textureId = 0, textureAnimId = 0, coordId = 0;
+                quint32 textureId = 0, coordId = 0;
+                qint32 textureAnimId = -1;
                 float alpha = 1.0f;
-                if (!mr.readU32(textureId) || !mr.readU32(textureAnimId) || !mr.readU32(coordId) ||
+                if (!mr.readU32(textureId) || !mr.readI32(textureAnimId) || !mr.readU32(coordId) ||
                     !mr.readF32(alpha))
                 {
                     setErr(outError, "Unexpected EOF reading layer fields.");
                     return false;
                 }
                 layer.textureId = textureId;
+                layer.textureAnimId = textureAnimId;
                 layer.coordId = coordId;
                 layer.alpha = alpha;
 
-                // Optional emissive gain if present, then skip remaining tracks.
-                if ((layerEnd - mr.pos) >= 4)
+                // Optional emissive gain if present for newer versions.
+                if (mdxVersion > 800 && (layerEnd - mr.pos) >= 4)
                 {
                     float emissiveGain = 0.0f;
                     mr.readF32(emissiveGain);
                 }
 
-                // Skip remaining unknown tracks to end of layer
+                // Parse any tracks (we care about KMTA for alpha).
+                while (mr.pos + 4 <= layerEnd)
+                {
+                    char t[4] = {};
+                    if (!mr.peekTag(t)) break;
+                    if (!std::isalpha((unsigned char)t[0])) break;
+                    if (!mr.readTag(t)) break;
+                    if (tagEq(t, "KMTA"))
+                    {
+                        if (!parseFloatTrack(mr, 0, layer.trackAlpha))
+                            break;
+                    }
+                    else
+                    {
+                        // Unknown track for now; stop parsing to avoid desync.
+                        break;
+                    }
+                }
+                // Skip remaining unknown data.
                 mr.pos = layerEnd;
 
                 if (li == 0)
@@ -1164,6 +1188,104 @@ namespace
         r.pos = startPos + qsizetype(chunkSize);
         return true;
     }
+
+    static bool parseGeosetAnimations(Reader& r, quint32 chunkSize, ModelData& model, QString* outError)
+    {
+        Q_UNUSED(outError);
+        const qsizetype startPos = r.pos;
+        const qsizetype endPos = startPos + qsizetype(chunkSize);
+        while (r.pos + 4 <= endPos)
+        {
+            quint32 size = 0;
+            if (!r.readU32(size)) break;
+            if (size < 28) break;
+            const qsizetype objStart = r.pos - 4;
+            const qsizetype objEnd = objStart + qsizetype(size);
+            if (objEnd > endPos) break;
+
+            Reader gr;
+            gr.data = r.data + objStart;
+            gr.size = qsizetype(size);
+            gr.pos = 4;
+
+            ModelData::GeosetAnimation ga;
+            if (!gr.readF32(ga.alpha) || !gr.readU32(ga.flags) ||
+                !gr.readF32(ga.color.x) || !gr.readF32(ga.color.y) || !gr.readF32(ga.color.z) ||
+                !gr.readI32(ga.geosetId))
+            {
+                r.pos = objEnd;
+                continue;
+            }
+
+            while (gr.pos + 4 <= gr.size)
+            {
+                char tag[4] = {};
+                if (!gr.peekTag(tag)) break;
+                if (!std::isalpha((unsigned char)tag[0])) break;
+                if (!gr.readTag(tag)) break;
+                if (tagEq(tag, "KGAO")) { if (!parseFloatTrack(gr, 0, ga.trackAlpha)) break; }
+                else if (tagEq(tag, "KGAC")) { if (!parseVec3Track(gr, ga.trackColor)) break; }
+                else
+                {
+                    LogSink::instance().log(QString("Unknown GEOA track tag: %1%2%3%4")
+                                                .arg(QChar(tag[0])).arg(QChar(tag[1]))
+                                                .arg(QChar(tag[2])).arg(QChar(tag[3])));
+                    break;
+                }
+            }
+
+            model.geosetAnimations.push_back(std::move(ga));
+            r.pos = objEnd;
+        }
+        r.pos = startPos + qsizetype(chunkSize);
+        return true;
+    }
+
+    static bool parseTextureAnimations(Reader& r, quint32 chunkSize, ModelData& model, QString* outError)
+    {
+        Q_UNUSED(outError);
+        const qsizetype startPos = r.pos;
+        const qsizetype endPos = startPos + qsizetype(chunkSize);
+        while (r.pos + 4 <= endPos)
+        {
+            quint32 size = 0;
+            if (!r.readU32(size)) break;
+            if (size < 4) break;
+            const qsizetype objStart = r.pos - 4;
+            const qsizetype objEnd = objStart + qsizetype(size);
+            if (objEnd > endPos) break;
+
+            Reader tr;
+            tr.data = r.data + objStart;
+            tr.size = qsizetype(size);
+            tr.pos = 4;
+
+            ModelData::TextureAnimation ta;
+            while (tr.pos + 4 <= tr.size)
+            {
+                char tag[4] = {};
+                if (!tr.peekTag(tag)) break;
+                if (!std::isalpha((unsigned char)tag[0])) break;
+                if (!tr.readTag(tag)) break;
+                if (tagEq(tag, "KTAT")) { if (!parseVec3Track(tr, ta.translation)) break; }
+                else if (tagEq(tag, "KTAR")) { if (!parseVec4Track(tr, ta.rotation)) break; }
+                else if (tagEq(tag, "KTAS")) { if (!parseVec3Track(tr, ta.scaling)) break; }
+                else
+                {
+                    LogSink::instance().log(QString("Unknown TXAN track tag: %1%2%3%4")
+                                                .arg(QChar(tag[0])).arg(QChar(tag[1]))
+                                                .arg(QChar(tag[2])).arg(QChar(tag[3])));
+                    break;
+                }
+            }
+
+            model.textureAnimations.push_back(std::move(ta));
+            r.pos = objEnd;
+        }
+
+        r.pos = startPos + qsizetype(chunkSize);
+        return true;
+    }
 }
 
 namespace MdxLoader
@@ -1227,6 +1349,11 @@ namespace MdxLoader
             else if (tagEq(tag, "MTLS"))
             {
                 if (!parseMaterials(cr, chunkSize, model.mdxVersion, model, outError))
+                    return std::nullopt;
+            }
+            else if (tagEq(tag, "TXAN"))
+            {
+                if (!parseTextureAnimations(cr, chunkSize, model, outError))
                     return std::nullopt;
             }
             else if (tagEq(tag, "GEOS"))
@@ -1309,8 +1436,14 @@ namespace MdxLoader
                     sm.indexOffset = indexOffset;
                     sm.indexCount = indexCount;
                     sm.materialId = gs.materialId;
+                    sm.geosetIndex = geosetIndex - 1;
                     model.subMeshes.push_back(sm);
                 }
+            }
+            else if (tagEq(tag, "GEOA"))
+            {
+                if (!parseGeosetAnimations(cr, chunkSize, model, outError))
+                    return std::nullopt;
             }
             else if (tagEq(tag, "SEQS"))
             {

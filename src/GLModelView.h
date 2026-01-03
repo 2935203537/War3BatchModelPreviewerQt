@@ -31,6 +31,8 @@ public:
     void setBackgroundAlpha(float alpha);
     void setCameraAngles(float yaw, float pitch, float roll);
     void setCameraPan(float x, float y, float z);
+    void setCurrentSequence(int seqIndex);
+    void setForceParticleVisible(bool enabled);
     void dumpCpuSkinCheck(const QString& outPath, int geosetIndex = 0);
 
     // Animation / playback
@@ -83,6 +85,7 @@ private:
         std::uint32_t indexOffset = 0;
         std::uint32_t indexCount = 0;
         std::uint32_t materialId = 0;
+        std::uint32_t geosetIndex = 0;
     };
 
     struct GpuCacheEntry
@@ -154,6 +157,7 @@ private:
     bool alphaTestEnabled_ = false;
     bool isGles_ = false;
     float backgroundAlpha_ = 1.0f;
+    bool forceParticleVisible_ = false;
 
     // Model framing
     QVector3D modelCenter_{0,0,0};
@@ -199,6 +203,9 @@ private:
     {
         QVector3D pos;
         QVector3D vel;
+        float gravity = 0.0f;
+        float facing = 0.0f;
+        int tailType = 0; // 0=head, 1=tail
         float age = 0.0f;
         float life = 1.0f;
     };
@@ -207,6 +214,7 @@ private:
     {
         double spawnAccum = 0.0;
         std::vector<Particle> particles;
+        bool loggedNoSpawn = false;
     };
 
     std::vector<RuntimeEmitter2> runtimeEmitters2_;

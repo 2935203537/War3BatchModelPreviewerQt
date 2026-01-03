@@ -28,6 +28,7 @@
 #include <QGroupBox>
 #include <QFrame>
 #include <QDoubleSpinBox>
+#include <QCheckBox>
 #include <QFormLayout>
 #include <QSignalBlocker>
 #include <QTextStream>
@@ -438,11 +439,14 @@ void MainWindow::buildUi()
     auto* panel = new QFrame();
     panel->setStyleSheet(
         "QFrame { background: #f7f7f9; border-radius: 8px; }"
-        "QGroupBox { font-weight: 600; border: none; margin-top: 8px; }"
-        "QGroupBox::title { subcontrol-origin: margin; subcontrol-position: top left; padding: 2px 0; }"
+        "QLabel { color: #1e1e1e; }"
+        "QCheckBox { color: #1e1e1e; }"
+        "QGroupBox { font-weight: 600; border: none; margin-top: 8px; color: #1e1e1e; }"
+        "QGroupBox::title { subcontrol-origin: margin; subcontrol-position: top left; padding: 2px 0; color: #1e1e1e; }"
         "QPushButton { background: #2f2f33; color: #f2f2f2; border-radius: 6px; padding: 6px 10px; }"
         "QPushButton:hover { background: #3a3a40; }"
         "QComboBox, QLineEdit { background: #2f2f33; color: #f2f2f2; border-radius: 6px; padding: 4px 8px; }"
+        "QComboBox QAbstractItemView { background: #2f2f33; color: #f2f2f2; selection-background-color: #3a3a40; selection-color: #ffffff; }"
         "QSlider::groove:horizontal { height: 6px; background: #dcdde1; border-radius: 3px; }"
         "QSlider::handle:horizontal { width: 14px; margin: -4px 0; background: #5b8cff; border-radius: 7px; }"
     );
@@ -462,10 +466,10 @@ void MainWindow::buildUi()
     controlLayout->setSpacing(8);
 
     auto* animLabel = new QLabel("Animation");
-    auto* animCombo = new QComboBox();
-    animCombo->addItem("[0]Stand");
+    animCombo_ = new QComboBox();
+    animCombo_->addItem("[0]Stand");
     controlLayout->addWidget(animLabel);
-    controlLayout->addWidget(animCombo);
+    controlLayout->addWidget(animCombo_);
 
     auto* teamLabel = new QLabel("Team Color");
     auto* teamCombo = new QComboBox();
@@ -487,6 +491,10 @@ void MainWindow::buildUi()
     bgAlphaSlider_->setValue(100);
     controlLayout->addWidget(bgTitle);
     controlLayout->addWidget(bgAlphaSlider_);
+
+    forceParticleCheck_ = new QCheckBox("Force Particle Visibility");
+    forceParticleCheck_->setToolTip("Ignore visibility track and always emit particles");
+    controlLayout->addWidget(forceParticleCheck_);
 
     panelLayout->addWidget(controlBox);
 
@@ -645,6 +653,14 @@ void MainWindow::buildUi()
         if (viewer_)
             viewer_->setBackgroundAlpha(a);
     });
+    connect(forceParticleCheck_, &QCheckBox::toggled, this, [this](bool on){
+        if (viewer_)
+            viewer_->setForceParticleVisible(on);
+    });
+    connect(animCombo_, &QComboBox::currentIndexChanged, this, [this](int idx){
+        if (viewer_)
+            viewer_->setCurrentSequence(idx);
+    });
 
     auto applyAngles = [this]() {
         if (!viewer_ || !yawSpin_ || !pitchSpin_ || !rollSpin_)
@@ -779,6 +795,13 @@ void MainWindow::onModelLoadFinished()
                                   .arg(displayName)
                                   .arg(result.error));
         LogSink::instance().log(QString("Load failed: %1 | %2").arg(result.path, result.error));
+        if (animCombo_)
+        {
+            const QSignalBlocker block(*animCombo_);
+            animCombo_->clear();
+            animCombo_->addItem("[0]Stand");
+            animCombo_->setCurrentIndex(0);
+        }
         return;
     }
 
@@ -790,6 +813,28 @@ void MainWindow::onModelLoadFinished()
                                 .arg(result.path)
                                 .arg(shared->vertices.size())
                                 .arg(shared->indices.size() / 3));
+
+    if (animCombo_)
+    {
+        const QSignalBlocker block(*animCombo_);
+        animCombo_->clear();
+        if (!shared->sequences.empty())
+        {
+            for (std::size_t i = 0; i < shared->sequences.size(); ++i)
+            {
+                const auto& seq = shared->sequences[i];
+                animCombo_->addItem(QString("[%1]%2").arg(i).arg(QString::fromStdString(seq.name)));
+            }
+            animCombo_->setCurrentIndex(0);
+            if (viewer_)
+                viewer_->setCurrentSequence(0);
+        }
+        else
+        {
+            animCombo_->addItem("[0]Stand");
+            animCombo_->setCurrentIndex(0);
+        }
+    }
 }
 
 void MainWindow::onWar3RootChanged()
@@ -1040,6 +1085,27 @@ void MainWindow::loadSelectedModel(const QString& filePath)
             viewer_->setModel(std::optional<ModelData>(*it.value()), displayName, filePath);
         else
             viewer_->setModel(std::nullopt, displayName, filePath);
+        if (animCombo_)
+        {
+            const QSignalBlocker block(*animCombo_);
+            animCombo_->clear();
+            if (it.value() && !it.value()->sequences.empty())
+            {
+                for (std::size_t i = 0; i < it.value()->sequences.size(); ++i)
+                {
+                    const auto& seq = it.value()->sequences[i];
+                    animCombo_->addItem(QString("[%1]%2").arg(i).arg(QString::fromStdString(seq.name)));
+                }
+                animCombo_->setCurrentIndex(0);
+                if (viewer_)
+                    viewer_->setCurrentSequence(0);
+            }
+            else
+            {
+                animCombo_->addItem("[0]Stand");
+                animCombo_->setCurrentIndex(0);
+            }
+        }
         LogSink::instance().log(QString("Loaded model from cache: %1").arg(filePath));
         return;
     }

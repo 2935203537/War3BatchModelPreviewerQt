@@ -11,6 +11,7 @@
 #include <QOpenGLContext>
 #include <QQuaternion>
 #include <QTextStream>
+#include <QVector2D>
 #include <QVector4D>
 
 #include <algorithm>
@@ -103,6 +104,139 @@ namespace
     static float dotQuat(const Vec4& a, const Vec4& b)
     {
         return a.x*b.x + a.y*b.y + a.z*b.z + a.w*b.w;
+    }
+
+    static bool LoadTgaFromBytes(const QByteArray& bytes, QImage* outImage, QString* outError)
+    {
+        if (!outImage)
+            return false;
+
+        if (bytes.size() < 18)
+        {
+            if (outError) *outError = "TGA header too small.";
+            return false;
+        }
+
+        const unsigned char* data = reinterpret_cast<const unsigned char*>(bytes.constData());
+        const int idLength = data[0];
+        const int colorMapType = data[1];
+        const int imageType = data[2];
+        const int width = data[12] | (data[13] << 8);
+        const int height = data[14] | (data[15] << 8);
+        const int bpp = data[16];
+        const int descriptor = data[17];
+
+        if (colorMapType != 0)
+        {
+            if (outError) *outError = "TGA color map not supported.";
+            return false;
+        }
+        if (imageType != 2 && imageType != 10)
+        {
+            if (outError) *outError = "TGA type not supported.";
+            return false;
+        }
+        if (bpp != 24 && bpp != 32)
+        {
+            if (outError) *outError = "TGA bpp not supported.";
+            return false;
+        }
+        if (width <= 0 || height <= 0)
+        {
+            if (outError) *outError = "TGA invalid dimensions.";
+            return false;
+        }
+
+        const int pixelSize = bpp / 8;
+        const bool originTop = (descriptor & 0x20) != 0;
+        int offset = 18 + idLength;
+
+        QImage img(width, height, QImage::Format_RGBA8888);
+        if (img.isNull())
+        {
+            if (outError) *outError = "TGA QImage alloc failed.";
+            return false;
+        }
+
+        auto writePixel = [&](int x, int y, const unsigned char* src)
+        {
+            const int dstY = originTop ? y : (height - 1 - y);
+            unsigned char* row = img.bits() + dstY * img.bytesPerLine();
+            row[x * 4 + 0] = src[2];
+            row[x * 4 + 1] = src[1];
+            row[x * 4 + 2] = src[0];
+            row[x * 4 + 3] = (pixelSize == 4) ? src[3] : 255;
+        };
+
+        int x = 0;
+        int y = 0;
+        if (imageType == 2)
+        {
+            const int needed = width * height * pixelSize;
+            if (offset + needed > bytes.size())
+            {
+                if (outError) *outError = "TGA data truncated.";
+                return false;
+            }
+
+            const unsigned char* src = data + offset;
+            for (y = 0; y < height; ++y)
+            {
+                for (x = 0; x < width; ++x)
+                {
+                    writePixel(x, y, src);
+                    src += pixelSize;
+                }
+            }
+        }
+        else
+        {
+            while (y < height && offset < bytes.size())
+            {
+                unsigned char header = data[offset++];
+                const int count = (header & 0x7F) + 1;
+                if (header & 0x80)
+                {
+                    if (offset + pixelSize > bytes.size())
+                        break;
+                    const unsigned char* px = data + offset;
+                    offset += pixelSize;
+                    for (int i = 0; i < count; ++i)
+                    {
+                        writePixel(x, y, px);
+                        x++;
+                        if (x >= width)
+                        {
+                            x = 0;
+                            y++;
+                            if (y >= height)
+                                break;
+                        }
+                    }
+                }
+                else
+                {
+                    for (int i = 0; i < count; ++i)
+                    {
+                        if (offset + pixelSize > bytes.size())
+                            break;
+                        writePixel(x, y, data + offset);
+                        offset += pixelSize;
+                        x++;
+                        if (x >= width)
+                        {
+                            x = 0;
+                            y++;
+                            if (y >= height)
+                                break;
+                        }
+                    }
+                }
+            }
+        }
+
+        *outImage = img;
+        return true;
     }
 
     static Vec4 slerpQuat(Vec4 a, Vec4 b, float t, bool invertIfNecessary)
@@ -285,10 +419,15 @@ namespace
     constexpr std::uint32_t LAYER_TWOSIDED   = 0x10;
     constexpr std::uint32_t LAYER_NODEPTH    = 0x40;
     constexpr std::uint32_t LAYER_NODEPTHSET = 0x80;
+    constexpr std::uint32_t LAYER_UNLIT      = 0x100;
 
     constexpr std::uint32_t NODE_DONT_INHERIT_TRANSLATION = 0x1;
-    constexpr std::uint32_t NODE_DONT_INHERIT_ROTATION    = 0x2;
-    constexpr std::uint32_t NODE_DONT_INHERIT_SCALING     = 0x4;
+    constexpr std::uint32_t NODE_DONT_INHERIT_SCALING     = 0x2;
+    constexpr std::uint32_t NODE_DONT_INHERIT_ROTATION    = 0x4;
+
+    constexpr std::uint32_t PRE2_LINE_EMITTER = 0x20000;
+    constexpr std::uint32_t PRE2_MODEL_SPACE  = 0x80000;
+    constexpr std::uint32_t PRE2_XY_QUAD      = 0x100000;
 }
 
 GLModelView::GLModelView(QWidget* parent)
@@ -340,6 +479,24 @@ void GLModelView::setCameraPan(float x, float y, float z)
     panOffset_ = QVector3D(x, y, z);
     emit panChanged(panOffset_.x(), panOffset_.y(), panOffset_.z());
     update();
+}
+
+void GLModelView::setCurrentSequence(int seqIndex)
+{
+    if (!model_ || model_->sequences.empty())
+    {
+        currentSeq_ = 0;
+        localTimeMs_ = 0;
+        return;
+    }
+    const int maxIndex = int(model_->sequences.size()) - 1;
+    currentSeq_ = std::max(0, std::min(seqIndex, maxIndex));
+    localTimeMs_ = 0;
+}
+
+void GLModelView::setForceParticleVisible(bool enabled)
+{
+    forceParticleVisible_ = enabled;
 }
 
 void GLModelView::setAssetRoot(const QString& assetRoot)
@@ -604,15 +761,30 @@ void GLModelView::initializeGL()
         uniform int uAlphaTest;
         uniform float uAlphaCutoff;
         uniform float uMatAlpha;
+        uniform vec3 uMatColor;
         uniform int uUnshaded;
+        uniform vec2 uUvTrans;
+        uniform vec2 uUvRot;
+        uniform float uUvScale;
 
         out vec4 FragColor;
 
+        vec2 quat_transform(vec2 q, vec2 v) {
+            vec2 uv = vec2(-q.x * v.y, q.x * v.x);
+            vec2 uuv = vec2(-q.x * uv.y, q.x * uv.x);
+            return v + 2.0 * (uv * q.y + uuv);
+        }
+
         void main(){
             vec4 base = vec4(0.78, 0.78, 0.78, 1.0);
+            vec2 uv = vUV;
+            uv += uUvTrans;
+            uv = quat_transform(uUvRot, uv - 0.5) + 0.5;
+            uv = uUvScale * (uv - 0.5) + 0.5;
             if(uHasTex != 0){
-                base = texture(uTex, vUV);
+                base = texture(uTex, uv);
             }
+            base.rgb *= uMatColor;
             base.a *= uMatAlpha;
 
             if(uAlphaTest != 0 && base.a < uAlphaCutoff){
@@ -808,7 +980,9 @@ void GLModelView::updateEmitters(float dtSeconds)
     std::uint32_t globalTimeMs = localTimeMs_;
     if (!model_->sequences.empty())
     {
-        const auto& seq = model_->sequences[std::size_t(std::max(0, currentSeq_))];
+        const std::size_t seqIndex = std::min<std::size_t>(model_->sequences.size() - 1,
+                                                           std::size_t(std::max(0, currentSeq_)));
+        const auto& seq = model_->sequences[seqIndex];
         const std::uint32_t start = seq.startMs;
         const std::uint32_t end = std::max(seq.endMs, seq.startMs + 1);
         const std::uint32_t len = end - start;
@@ -816,6 +990,9 @@ void GLModelView::updateEmitters(float dtSeconds)
         globalTimeMs = start + local;
     }
     lastGlobalTimeMs_ = globalTimeMs;
+
+    // Update node transforms for this frame (particles may rely on them).
+    buildNodeWorldCached(globalTimeMs);
 
     // RNG (fixed seed per run; adequate for preview)
     static thread_local std::mt19937 rng(1337u);
@@ -831,7 +1008,9 @@ void GLModelView::updateEmitters(float dtSeconds)
         const auto& e = model_->emitters2[ei];
         auto& rt = runtimeEmitters2_[ei];
 
-        const float vis = clampf(sampleTrackFloat(e.trackVisibility, globalTimeMs, 1.0f, *model_), 0.0f, 1.0f);
+        const float vis = forceParticleVisible_
+                              ? 1.0f
+                              : clampf(sampleTrackFloat(e.trackVisibility, globalTimeMs, 1.0f, *model_), 0.0f, 1.0f);
         if (vis <= 0.001f)
         {
             // Still age existing particles so they fade out naturally.
@@ -840,11 +1019,38 @@ void GLModelView::updateEmitters(float dtSeconds)
         const float speed = sampleTrackFloat(e.trackSpeed, globalTimeMs, e.speed, *model_);
         const float variation = sampleTrackFloat(e.trackVariation, globalTimeMs, e.variation, *model_);
         const float latitude = sampleTrackFloat(e.trackLatitude, globalTimeMs, e.latitude, *model_);
-        const float emissionRate = std::max(0.0f, sampleTrackFloat(e.trackEmissionRate, globalTimeMs, e.emissionRate, *model_));
+        const float emissionRate = std::max(0.0f, sampleTrackFloat(e.trackEmissionRate, globalTimeMs, e.emissionRate, *model_)) * 2.0f;
         const float gravity = sampleTrackFloat(e.trackGravity, globalTimeMs, e.gravity, *model_);
         const float lifespan = std::max(0.01f, sampleTrackFloat(e.trackLifespan, globalTimeMs, e.lifespan, *model_));
         const float width = sampleTrackFloat(e.trackWidth, globalTimeMs, e.width, *model_);
         const float length = sampleTrackFloat(e.trackLength, globalTimeMs, e.length, *model_);
+
+        const bool modelSpace = (e.flags & PRE2_MODEL_SPACE) != 0;
+        const bool lineEmitter = (e.flags & PRE2_LINE_EMITTER) != 0;
+        const bool xyQuad = (e.flags & PRE2_XY_QUAD) != 0;
+
+        QVector3D pivot(0, 0, 0);
+        QMatrix4x4 nodeWorld;
+        nodeWorld.setToIdentity();
+        QQuaternion nodeRot(1, 0, 0, 0);
+        QVector3D nodeScale(1, 1, 1);
+
+        if (e.objectId >= 0 && std::size_t(e.objectId) < model_->nodes.size())
+        {
+            const auto& n = model_->nodes[std::size_t(e.objectId)];
+            pivot = QVector3D(n.pivot.x, n.pivot.y, n.pivot.z);
+            if (std::size_t(e.objectId) < nodeWorldMat_.size())
+            {
+                nodeWorld = nodeWorldMat_[std::size_t(e.objectId)];
+                nodeRot = nodeWorldRot_[std::size_t(e.objectId)];
+                nodeScale = nodeWorldScale_[std::size_t(e.objectId)];
+            }
+        }
+        else if (e.objectId >= 0 && std::size_t(e.objectId) < model_->pivots.size())
+        {
+            const auto& p = model_->pivots[std::size_t(e.objectId)];
+            pivot = QVector3D(p.x, p.y, p.z);
+        }
 
         // Spawn particles
         if (vis > 0.001f && emissionRate > 0.0f)
@@ -856,41 +1062,76 @@ void GLModelView::updateEmitters(float dtSeconds)
                 rt.spawnAccum -= double(toSpawn);
                 toSpawn = std::min(toSpawn, 200); // safety cap
 
-                QVector3D pivot(0,0,0);
-                if (e.objectId >= 0 && std::size_t(e.objectId) < model_->pivots.size())
-                {
-                    const auto& p = model_->pivots[std::size_t(e.objectId)];
-                    pivot = QVector3D(p.x, p.y, p.z);
-                }
-
                 for (int i = 0; i < toSpawn; ++i)
                 {
-                    Particle p;
-                    p.age = 0.0f;
-                    p.life = lifespan;
+                    auto spawnParticle = [&](int tailType)
+                    {
+                        Particle p;
+                        p.age = 0.0f;
+                        p.life = lifespan;
+                        p.tailType = tailType;
 
-                    // Initial position: pivot + small scatter in X/Y using width/length
-                    const float sx = randSigned() * width;
-                    const float sy = randSigned() * length;
-                    p.pos = pivot + QVector3D(sx, sy, 0.0f);
+                        // Initial position: pivot + scatter in X/Y
+                        const float sx = randSigned() * width;
+                        const float sy = randSigned() * length;
+                        QVector3D localPos = pivot + QVector3D(sx, sy, 0.0f);
 
-                    // Direction within latitude (simplified)
-                    const float lat = latitude;
-                    const float ax = randSigned() * lat;
-                    const float ay = randSigned() * lat;
+                        // Build local rotation (match mdx-m3-viewer)
+                        const float lat = latitude;
+                        const float ay = randSigned() * lat;
+                        const float ax = randSigned() * lat;
+                        QQuaternion rot = QQuaternion::fromAxisAndAngle(0, 0, 1, 90.0f);
+                        rot *= QQuaternion::fromAxisAndAngle(0, 1, 0, ay * 57.2957795f);
+                        if (!lineEmitter)
+                            rot *= QQuaternion::fromAxisAndAngle(1, 0, 0, ax * 57.2957795f);
 
-                    QVector3D dir(0,0,1);
-                    QQuaternion qx = QQuaternion::fromAxisAndAngle(1,0,0, ax * 57.2957795f);
-                    QQuaternion qy = QQuaternion::fromAxisAndAngle(0,1,0, ay * 57.2957795f);
-                    dir = (qy * qx).rotatedVector(dir);
-                    dir.normalize();
+                        if (!modelSpace)
+                            rot = nodeRot * rot;
 
-                    const float sp = speed + randSigned() * variation;
-                    p.vel = dir * sp;
+                        QVector3D dir = rot.rotatedVector(QVector3D(0, 0, 1));
+                        dir.normalize();
 
-                    rt.particles.push_back(p);
+                        const float sp = speed * (1.0f + randSigned() * variation);
+                        QVector3D vel = dir * sp;
+
+                        if (!modelSpace)
+                        {
+                            vel = QVector3D(vel.x() * nodeScale.x(),
+                                            vel.y() * nodeScale.y(),
+                                            vel.z() * nodeScale.z());
+                            localPos = (nodeWorld * QVector4D(localPos, 1.0f)).toVector3D();
+                        }
+
+                        p.pos = localPos;
+                        p.vel = vel;
+                        p.gravity = modelSpace ? gravity : (gravity * nodeScale.z());
+
+                        if (xyQuad)
+                            p.facing = std::atan2(p.vel.y(), p.vel.x()) - float(M_PI) + float(M_PI / 8.0);
+
+                        rt.particles.push_back(p);
+                    };
+
+                    const bool wantHead = (e.headOrTail == 0 || e.headOrTail == 2);
+                    const bool wantTail = (e.headOrTail == 1 || e.headOrTail == 2);
+                    if (wantHead)
+                        spawnParticle(0);
+                    if (wantTail)
+                        spawnParticle(1);
                 }
             }
+        }
+        else if (!rt.loggedNoSpawn && localTimeMs_ > 1000)
+        {
+            rt.loggedNoSpawn = true;
+            LogSink::instance().log(QString("PRE2 %1 no spawn: vis=%2 rate=%3 life=%4 rows=%5 cols=%6 flags=0x%7")
+                                        .arg(ei)
+                                        .arg(vis, 0, 'f', 3)
+                                        .arg(emissionRate, 0, 'f', 3)
+                                        .arg(lifespan, 0, 'f', 3)
+                                        .arg(e.rows)
+                                        .arg(e.columns)
+                                        .arg(QString::number(e.flags, 16)));
         }
 
         // Update existing particles
@@ -898,7 +1139,7 @@ void GLModelView::updateEmitters(float dtSeconds)
         {
             p.age += dtSeconds;
             // gravity pulls down in Z
-            p.vel.setZ(p.vel.z() - gravity * dtSeconds);
+            p.vel.setZ(p.vel.z() - p.gravity * dtSeconds);
             p.pos += p.vel * dtSeconds;
         }
 
@@ -1155,7 +1396,20 @@ void GLModelView::updateSkinning(std::uint32_t globalTimeMs)
 
     // Heuristic: most WC3 MDX files store MATS indices as bone indices (BONE chunk order).
     // Some non-standard exporters may store global node ids instead. Detect this once.
-    bool skinIndicesAreBoneIndices = !boneWorld.empty();
+    bool boneMapIsIdentity = !model_->boneNodeIds.empty();
+    if (boneMapIsIdentity)
+    {
+        for (std::size_t i = 0; i < model_->boneNodeIds.size(); ++i)
+        {
+            if (model_->boneNodeIds[i] != int(i))
+            {
+                boneMapIsIdentity = false;
+                break;
+            }
+        }
+    }
+
+    bool skinIndicesAreBoneIndices = boneMapIsIdentity && !boneWorld.empty();
     if (skinIndicesAreBoneIndices)
     {
         int maxIdx = -1;
@@ -1355,16 +1609,29 @@ void GLModelView::dumpCpuSkinCheck(const QString& outPath, int geosetIndex)
     buildBoneWorld(nodeWorldBind, boneWorldBind);
     buildBoneWorld(nodeWorldAnim, boneWorldAnim);
 
-    bool skinIndicesAreBoneIndices = !boneWorldBind.empty();
-    if (skinIndicesAreBoneIndices)
-    {
-        int maxIdx = -1;
-        for (const auto& g : model_->skinGroups)
-            for (int idx : g.nodeIndices)
-                if (idx > maxIdx) maxIdx = idx;
-        if (maxIdx >= int(boneWorldBind.size()))
-            skinIndicesAreBoneIndices = false;
-    }
+      bool boneMapIsIdentity = !model_->boneNodeIds.empty();
+      if (boneMapIsIdentity)
+      {
+          for (std::size_t i = 0; i < model_->boneNodeIds.size(); ++i)
+          {
+              if (model_->boneNodeIds[i] != int(i))
+              {
+                  boneMapIsIdentity = false;
+                  break;
+              }
+          }
+      }
+
+      bool skinIndicesAreBoneIndices = boneMapIsIdentity && !boneWorldBind.empty();
+      if (skinIndicesAreBoneIndices)
+      {
+          int maxIdx = -1;
+          for (const auto& g : model_->skinGroups)
+              for (int idx : g.nodeIndices)
+                  if (idx > maxIdx) maxIdx = idx;
+          if (maxIdx >= int(boneWorldBind.size()))
+              skinIndicesAreBoneIndices = false;
+      }
 
     const std::vector<QMatrix4x4>& bindMats = skinIndicesAreBoneIndices ? boneWorldBind : nodeWorldBind;
     const std::vector<QMatrix4x4>& animMats = skinIndicesAreBoneIndices ? boneWorldAnim : nodeWorldAnim;
@@ -1384,11 +1651,11 @@ void GLModelView::dumpCpuSkinCheck(const QString& outPath, int geosetIndex)
     ts << "skinIndicesAreBoneIndices=" << (skinIndicesAreBoneIndices ? "true" : "false") << "\n";
     ts << "nodeCount=" << model_->nodes.size() << " boneCount=" << model_->boneNodeIds.size() << "\n";
 
-    if (geosetIndex >= 0 && std::size_t(geosetIndex) < model_->geosetDiagnostics.size())
-    {
-        const auto& gd = model_->geosetDiagnostics[std::size_t(geosetIndex)];
-        ts << "\n[Geoset " << geosetIndex << "] MTGC/MATS expanded:\n";
-        std::size_t offset = 0;
+      if (geosetIndex >= 0 && std::size_t(geosetIndex) < model_->geosetDiagnostics.size())
+      {
+          const auto& gd = model_->geosetDiagnostics[std::size_t(geosetIndex)];
+          ts << "\n[Geoset " << geosetIndex << "] MTGC/MATS expanded:\n";
+          std::size_t offset = 0;
         for (std::size_t gi = 0; gi < gd.mtgc.size(); ++gi)
         {
             const std::size_t size = gd.mtgc[gi];
@@ -1400,9 +1667,57 @@ void GLModelView::dumpCpuSkinCheck(const QString& outPath, int geosetIndex)
             }
             ts << "}\n";
             offset += size;
-        }
-        Q_ASSERT(offset == gd.mats.size());
-    }
+          }
+          Q_ASSERT(offset == gd.mats.size());
+          ts << "geosetBaseVertex=" << gd.baseVertex << " vertexCount=" << gd.vertexCount << "\n";
+          if (!model_->skinGroups.empty())
+          {
+              std::vector<int> groupUsage(model_->skinGroups.size(), 0);
+              const std::size_t start = gd.baseVertex;
+              const std::size_t end = std::min(start + gd.vertexCount, model_->vertexGroups.size());
+              for (std::size_t v = start; v < end; ++v)
+              {
+                  const std::uint16_t gid = model_->vertexGroups[v];
+                  Q_ASSERT(gid < model_->skinGroups.size());
+                  if (gid < groupUsage.size())
+                      groupUsage[gid] += 1;
+              }
+              ts << "groupUsage (non-zero):\n";
+              for (std::size_t gi = 0; gi < groupUsage.size(); ++gi)
+              {
+                  if (groupUsage[gi] == 0)
+                      continue;
+                  ts << "  group " << gi << " verts=" << groupUsage[gi] << " bones={";
+                  const auto& bones = model_->skinGroups[gi].nodeIndices;
+                  const int k = std::min<int>(int(bones.size()), 8);
+                  for (int i = 0; i < k; ++i)
+                  {
+                      if (i) ts << ", ";
+                      ts << bones[std::size_t(i)];
+                  }
+                  if (bones.size() > std::size_t(k))
+                      ts << ", ...";
+                  ts << "}\n";
+              }
+          }
+      }
+ 
+      if (!model_->skinGroups.empty())
+      {
+          std::size_t maxSize = 0;
+          for (const auto& g : model_->skinGroups)
+              maxSize = std::max(maxSize, g.nodeIndices.size());
+          std::vector<int> hist(maxSize + 1, 0);
+          for (const auto& g : model_->skinGroups)
+              hist[g.nodeIndices.size()] += 1;
+          ts << "\nGroup size histogram:\n";
+          for (std::size_t sz = 0; sz < hist.size(); ++sz)
+          {
+              if (hist[sz] == 0)
+                  continue;
+              ts << "  size " << sz << " : " << hist[sz] << "\n";
+          }
+      }
 
     ts << "\nSampled vertices:\n";
     if (model_->bindVertices.empty())
@@ -1550,17 +1865,84 @@ void GLModelView::paintGL()
             const auto& mat = model_->materials[matId];
             const auto& layer = mat.layer;
 
-            const bool unshaded = (layer.shadingFlags & LAYER_UNSHADED) != 0;
+            const bool unshaded = (layer.shadingFlags & (LAYER_UNSHADED | LAYER_UNLIT)) != 0;
             const bool noDepthTest = (layer.shadingFlags & LAYER_NODEPTH) != 0;
             const bool noDepthSet  = (layer.shadingFlags & LAYER_NODEPTHSET) != 0;
+            const bool twoSided = (layer.shadingFlags & LAYER_TWOSIDED) != 0;
 
             const std::uint32_t filter = layer.filterMode;
 
-            const bool alphaTest = alphaTestEnabled_ && (filter == 1);
+            bool alphaTest = false;
+            float alphaCutoff = 0.5f;
+            if (alphaTestEnabled_)
+            {
+                if (filter == 1)
+                {
+                    alphaTest = true;
+                    alphaCutoff = 0.75f;
+                }
+                else if (filter >= 5)
+                {
+                    alphaTest = true;
+                    alphaCutoff = 0.02f;
+                }
+            }
             const bool blended   = (filter == 2 || filter == 3 || filter == 4 || filter == 5 || filter == 6);
+
+            float geosetAlpha = 1.0f;
+            QVector3D geosetColor(1.0f, 1.0f, 1.0f);
+            if (!model_->geosetAnimations.empty())
+            {
+                for (const auto& ga : model_->geosetAnimations)
+                {
+                    if (ga.geosetId == static_cast<std::int32_t>(sm.geosetIndex))
+                    {
+                        const float baseAlpha = clampf(ga.alpha, 0.0f, 1.0f);
+                        geosetAlpha = clampf(sampleTrackFloat(ga.trackAlpha, lastGlobalTimeMs_, baseAlpha, *model_), 0.0f, 1.0f);
+                        if ((ga.flags & 0x2u) != 0u || !ga.trackColor.empty())
+                        {
+                            const Vec3 defColor = ga.color;
+                            const Vec3 c = sampleTrackVec3(ga.trackColor, lastGlobalTimeMs_, defColor, *model_);
+                            geosetColor = QVector3D(c.x, c.y, c.z);
+                        }
+                        break;
+                    }
+                }
+            }
+            if (geosetAlpha <= 0.001f)
+                return;
+
+            QVector2D uvTrans(0.0f, 0.0f);
+            QVector2D uvRot(0.0f, 1.0f);
+            float uvScale = 1.0f;
+            if (!model_->textureAnimations.empty() && layer.textureAnimId >= 0)
+            {
+                const std::uint32_t animId = static_cast<std::uint32_t>(layer.textureAnimId);
+                if (animId < model_->textureAnimations.size())
+                {
+                    const auto& ta = model_->textureAnimations[animId];
+                    const Vec3 defT{0.0f, 0.0f, 0.0f};
+                    const Vec3 defS{1.0f, 1.0f, 1.0f};
+                    const Vec4 defR{0.0f, 0.0f, 0.0f, 1.0f};
+                    const Vec3 t = sampleTrackVec3(ta.translation, lastGlobalTimeMs_, defT, *model_);
+                    const Vec3 s = sampleTrackVec3(ta.scaling, lastGlobalTimeMs_, defS, *model_);
+                    Vec4 r = sampleTrackQuat(ta.rotation, lastGlobalTimeMs_, defR, *model_);
+                    float rl = std::sqrt(r.z * r.z + r.w * r.w);
+                    if (rl > 0.0f)
+                    {
+                        r.z /= rl;
+                        r.w /= rl;
+                    }
+                    uvTrans = QVector2D(t.x, t.y);
+                    uvRot = QVector2D(r.z, r.w);
+                    uvScale = s.x;
+                }
+            }
 
             if (transparentPass != blended)
                 return;
+
+            if (twoSided) glDisable(GL_CULL_FACE); else glEnable(GL_CULL_FACE);
 
             if (noDepthTest) glDisable(GL_DEPTH_TEST); else glEnable(GL_DEPTH_TEST);
             glDepthMask(noDepthSet ? GL_FALSE : GL_TRUE);
@@ -1570,12 +1952,15 @@ void GLModelView::paintGL()
                 glEnable(GL_BLEND);
                 switch (filter)
                 {
+                case 2: // Blend
+                    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+                    break;
                 case 3: // Additive
                 case 4: // Add alpha (approx)
                     glBlendFunc(GL_SRC_ALPHA, GL_ONE);
                     break;
                 case 5: // Modulate
-                    glBlendFunc(GL_DST_COLOR, GL_ZERO);
+                    glBlendFunc(GL_ZERO, GL_SRC_COLOR);
                     break;
                 case 6: // Modulate2x (approx)
                     glBlendFunc(GL_DST_COLOR, GL_SRC_COLOR);
@@ -1599,9 +1984,14 @@ void GLModelView::paintGL()
             program_.setUniformValue("uTex", 0);
             program_.setUniformValue("uHasTex", hasTex ? 1 : 0);
             program_.setUniformValue("uAlphaTest", alphaTest ? 1 : 0);
-            program_.setUniformValue("uAlphaCutoff", 0.5f);
-            program_.setUniformValue("uMatAlpha", clampf(layer.alpha, 0.0f, 1.0f));
+            program_.setUniformValue("uAlphaCutoff", alphaCutoff);
+            const float layerAlpha = clampf(sampleTrackFloat(layer.trackAlpha, lastGlobalTimeMs_, layer.alpha, *model_), 0.0f, 1.0f);
+            program_.setUniformValue("uMatAlpha", layerAlpha * geosetAlpha);
+            program_.setUniformValue("uMatColor", geosetColor);
             program_.setUniformValue("uUnshaded", unshaded ? 1 : 0);
+            program_.setUniformValue("uUvTrans", uvTrans);
+            program_.setUniformValue("uUvRot", uvRot);
+            program_.setUniformValue("uUvScale", uvScale);
 
             glDrawElements(
                 GL_TRIANGLES,
@@ -1663,8 +2053,68 @@ void GLModelView::paintGL()
 
         glBindVertexArray(pVao_);
 
-        for (std::size_t ei = 0; ei < model_->emitters2.size(); ++ei)
+        std::vector<std::size_t> emitterOrder;
+        emitterOrder.reserve(model_->emitters2.size());
+        for (std::size_t i = 0; i < model_->emitters2.size(); ++i)
+            emitterOrder.push_back(i);
+        std::stable_sort(emitterOrder.begin(), emitterOrder.end(),
+                         [&](std::size_t a, std::size_t b)
+                         {
+                             const auto& ea = model_->emitters2[a];
+                             const auto& eb = model_->emitters2[b];
+                             if (ea.priorityPlane != eb.priorityPlane)
+                                 return ea.priorityPlane < eb.priorityPlane;
+                             return ea.filterMode < eb.filterMode;
+                         });
+
+        auto ensureTeamColor = [&]()
         {
+            if (teamColorTex_ != 0)
+                return;
+            const unsigned char pixels[4] = { 20, 120, 255, 255 };
+            glGenTextures(1, &teamColorTex_);
+            glBindTexture(GL_TEXTURE_2D, teamColorTex_);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+            glBindTexture(GL_TEXTURE_2D, 0);
+        };
+        auto ensureTeamGlow = [&]()
+        {
+            if (teamGlowTex_ != 0)
+                return;
+            const unsigned char pixels[4] = { 255, 200, 40, 255 };
+            glGenTextures(1, &teamGlowTex_);
+            glBindTexture(GL_TEXTURE_2D, teamGlowTex_);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+            glBindTexture(GL_TEXTURE_2D, 0);
+        };
+
+        auto getCell = [&](const std::uint32_t interval[3], float factor, int totalFrames) -> int
+        {
+            const float start = float(interval[0]);
+            const float end = float(interval[1]);
+            const float repeat = float(interval[2]);
+            const float spriteCount = end - start;
+            if (spriteCount > 0.0f)
+            {
+                const float idx = std::floor(spriteCount * repeat * factor);
+                const float modv = std::fmod(idx, spriteCount);
+                const float cell = std::min(start + modv, float(totalFrames - 1));
+                return int(cell);
+            }
+            return int(start);
+        };
+
+        for (std::size_t orderIdx = 0; orderIdx < emitterOrder.size(); ++orderIdx)
+        {
+            const std::size_t ei = emitterOrder[orderIdx];
             const auto& e = model_->emitters2[ei];
             const auto& rt = (ei < runtimeEmitters2_.size()) ? runtimeEmitters2_[ei] : RuntimeEmitter2{};
 
@@ -1672,15 +2122,29 @@ void GLModelView::paintGL()
                 continue;
 
             // Resolve texture
-            const GLuint tex = (e.textureId >= 0) ? getOrCreateTexture(std::uint32_t(e.textureId)) : placeholderTex_;
+            GLuint tex = placeholderTex_;
+            if (e.replaceableId == 1)
+            {
+                ensureTeamColor();
+                tex = teamColorTex_;
+            }
+            else if (e.replaceableId == 2)
+            {
+                ensureTeamGlow();
+                tex = teamGlowTex_;
+            }
+            else if (e.textureId >= 0)
+            {
+                tex = getOrCreateTexture(std::uint32_t(e.textureId));
+            }
             glActiveTexture(GL_TEXTURE0);
             glBindTexture(GL_TEXTURE_2D, tex);
 
             // Blend mode (match WC3 as closely as reasonable)
             const std::uint32_t f = e.filterMode;
             const bool alphaKey = (f == 4); // AlphaKey
-            particleProgram_.setUniformValue("uAlphaTest", 0);
-            particleProgram_.setUniformValue("uAlphaCutoff", 0.0f);
+            particleProgram_.setUniformValue("uAlphaTest", alphaKey ? 1 : 0);
+            particleProgram_.setUniformValue("uAlphaCutoff", alphaKey ? 0.5f : 0.0f);
             if (alphaKey)
             {
                 glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
@@ -1741,6 +2205,17 @@ void GLModelView::paintGL()
                 outScale = outScale / 100.0f;
             };
 
+            const bool modelSpace = (e.flags & PRE2_MODEL_SPACE) != 0;
+            const bool xyQuad = (e.flags & PRE2_XY_QUAD) != 0;
+            QMatrix4x4 emitterWorld;
+            emitterWorld.setToIdentity();
+            QVector3D emitterScale(1, 1, 1);
+            if (modelSpace && e.objectId >= 0 && std::size_t(e.objectId) < nodeWorldMat_.size())
+            {
+                emitterWorld = nodeWorldMat_[std::size_t(e.objectId)];
+                emitterScale = nodeWorldScale_[std::size_t(e.objectId)];
+            }
+
             for (const auto& p : rt.particles)
             {
                 const float tLife = clampf(p.age / std::max(0.001f, p.life), 0.0f, 1.0f);
@@ -1750,22 +2225,52 @@ void GLModelView::paintGL()
                 float scale;
                 evalSegment(tLife, col, alpha, scale);
 
-                // Sprite frame selection (simple; ignores head/tail intervals for now)
-                int frame = int(tLife * float(totalFrames));
-                if (frame >= totalFrames) frame = totalFrames - 1;
-                if (frame < 0) frame = 0;
+                auto pickFrame = [&](bool tailType) -> int
+                {
+                    float factor = tLife;
+                    int intervalIndex = 0;
+                    if (factor < e.timeMiddle)
+                    {
+                        factor = factor / std::max(0.0001f, e.timeMiddle);
+                        intervalIndex = 0;
+                    }
+                    else
+                    {
+                        factor = (factor - e.timeMiddle) / std::max(0.0001f, 1.0f - e.timeMiddle);
+                        intervalIndex = 1;
+                    }
+                    factor = std::min(factor, 1.0f);
 
-                const int fr = frame / int(std::max<std::uint32_t>(1, e.columns));
-                const int fc = frame % int(std::max<std::uint32_t>(1, e.columns));
+                    const std::uint32_t* interval = nullptr;
+                    if (!tailType)
+                        interval = e.headIntervals[intervalIndex];
+                    else
+                        interval = e.tailIntervals[intervalIndex];
 
-                const float u0 = float(fc) * invCols;
-                const float v0 = float(fr) * invRows;
-                const float u1 = u0 + invCols;
-                const float v1 = v0 + invRows;
+                    if (e.replaceableId == 1 || e.replaceableId == 2)
+                        return 0;
+                    return getCell(interval, factor, totalFrames);
+                };
 
-                const QVector3D pos = p.pos;
+                auto setupUv = [&](int frame, float& u0, float& v0, float& u1, float& v1)
+                {
+                    const int fr = frame / int(std::max<std::uint32_t>(1, e.columns));
+                    const int fc = frame % int(std::max<std::uint32_t>(1, e.columns));
+                    u0 = float(fc) * invCols;
+                    v0 = float(fr) * invRows;
+                    u1 = u0 + invCols;
+                    v1 = v0 + invRows;
+                };
 
-                const float half = 0.5f * std::max(0.01f, scale);
+                QVector3D pos = p.pos;
+                QVector3D vel = p.vel;
+                if (modelSpace)
+                {
+                    pos = (emitterWorld * QVector4D(pos, 1.0f)).toVector3D();
+                }
+
+                const float sizeScale = modelSpace ? emitterScale.x() : 1.0f;
+                const float half = 0.5f * std::max(0.01f, scale) * sizeScale;
                 const float r = col.x;
                 const float g = col.y;
                 const float b = col.z;
@@ -1786,9 +2291,12 @@ void GLModelView::paintGL()
                     particleVerts_.push_back(v);
                 };
 
-                if (e.headOrTail != 0 && e.tailLength > 0.0001f)
+                const bool wantHead = (p.tailType == 0);
+                const bool wantTail = (p.tailType == 1);
+
+                if (wantTail && e.tailLength > 0.0001f)
                 {
-                    QVector3D dir = p.vel;
+                    QVector3D dir = vel;
                     if (dir.lengthSquared() < 1e-6f)
                         dir = camFwd;
                     dir.normalize();
@@ -1798,27 +2306,50 @@ void GLModelView::paintGL()
                         side = camRight;
                     side.normalize();
 
-                    const QVector3D p0 = pos;
-                    const QVector3D p1 = pos - dir * e.tailLength;
+                    QVector3D p0 = pos;
+                    QVector3D p1 = pos - dir * e.tailLength;
+                    if (modelSpace)
+                    {
+                        const QVector3D tailLocal = p.pos - vel.normalized() * e.tailLength;
+                        p0 = (emitterWorld * QVector4D(p.pos, 1.0f)).toVector3D();
+                        p1 = (emitterWorld * QVector4D(tailLocal, 1.0f)).toVector3D();
+                    }
 
                     const QVector3D a0 = p0 + side * half;
                     const QVector3D a1 = p0 - side * half;
                     const QVector3D b0 = p1 + side * half;
                     const QVector3D b1 = p1 - side * half;
 
+                    float u0, v0, u1, v1;
+                    setupUv(pickFrame(true), u0, v0, u1, v1);
+
                     // two triangles (a0,a1,b1) and (a0,b1,b0)
                     pushTri(a0, u0, v0, a1, u1, v0, b1, u1, v1);
                     pushTri(a0, u0, v0, b1, u1, v1, b0, u0, v1);
                 }
-                else
+                if (wantHead)
                 {
-                    const QVector3D right = camRight * half;
-                    const QVector3D up = camUp * half;
+                    QVector3D right = camRight;
+                    QVector3D up = camUp;
+                    if (xyQuad)
+                    {
+                        const float cs = std::cos(p.facing);
+                        const float sn = std::sin(p.facing);
+                        const QVector3D r2 = right * cs - up * sn;
+                        const QVector3D u2 = right * sn + up * cs;
+                        right = r2;
+                        up = u2;
+                    }
+                    right *= half;
+                    up *= half;
 
                     const QVector3D p00 = pos - right - up;
                     const QVector3D p10 = pos + right - up;
                     const QVector3D p11 = pos + right + up;
                     const QVector3D p01 = pos - right + up;
+
+                    float u0, v0, u1, v1;
+                    setupUv(pickFrame(false), u0, v0, u1, v1);
 
                     // two triangles
                     pushTri(p00, u0, v0, p10, u1, v0, p11, u1, v1);
@@ -2080,6 +2611,7 @@ void GLModelView::rebuildGpuBuffers()
         g.indexOffset = sm.indexOffset;
         g.indexCount = sm.indexCount;
         g.materialId = sm.materialId;
+        g.geosetIndex = sm.geosetIndex;
         gpuSubmeshes_.push_back(g);
     }
 
@@ -2301,6 +2833,20 @@ GLuint GLModelView::getOrCreateTexture(std::uint32_t textureId)
                 if (ext == "blp")
                 {
                     ok = BlpLoader::LoadBlpToImageCached(resolved.path, &img, &err);
+                }
+                else if (ext == "tga")
+                {
+                    QFile tf(resolved.path);
+                    if (tf.open(QIODevice::ReadOnly))
+                    {
+                        const QByteArray tgaBytes = tf.readAll();
+                        ok = LoadTgaFromBytes(tgaBytes, &img, &err);
+                    }
+                    else
+                    {
+                        ok = false;
+                        err = "Qt failed to open TGA.";
+                    }
                 }
                 else
                 {
