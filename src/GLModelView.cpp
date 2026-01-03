@@ -443,6 +443,13 @@ void GLModelView::setModel(std::optional<ModelData> model, const QString& displa
     modelDir_ = filePath.isEmpty() ? QString() : QFileInfo(filePath).absolutePath();
     model_ = std::move(model);
     skinnedVertices_.clear();
+    nodeWorldMat_.clear();
+    nodeWorldLoc_.clear();
+    nodeInvWorldLoc_.clear();
+    nodeWorldRot_.clear();
+    nodeInvWorldRot_.clear();
+    nodeWorldScale_.clear();
+    nodeInvWorldScale_.clear();
 
     missingTextures_.clear();
     missingTextureSet_.clear();
@@ -460,6 +467,16 @@ void GLModelView::setModel(std::optional<ModelData> model, const QString& displa
     if (model_)
     {
         runtimeEmitters2_.resize(model_->emitters2.size());
+        const std::size_t nodeCount = model_->nodes.size();
+        nodeWorldMat_.assign(nodeCount, QMatrix4x4());
+        nodeWorldLoc_.assign(nodeCount, QVector3D(0, 0, 0));
+        nodeInvWorldLoc_.assign(nodeCount, QVector3D(0, 0, 0));
+        nodeWorldRot_.assign(nodeCount, QQuaternion(1, 0, 0, 0));
+        nodeInvWorldRot_.assign(nodeCount, QQuaternion(1, 0, 0, 0));
+        nodeWorldScale_.assign(nodeCount, QVector3D(1, 1, 1));
+        nodeInvWorldScale_.assign(nodeCount, QVector3D(1, 1, 1));
+        for (auto& m : nodeWorldMat_)
+            m.setToIdentity();
     }
 
     // Reset texture cache (textures are tied to model/material IDs)
@@ -971,6 +988,142 @@ void GLModelView::drawDebug(const QMatrix4x4& mvp)
     debugProgram_.release();
 }
 
+void GLModelView::buildNodeWorldCached(std::uint32_t globalTimeMs)
+{
+    if (!model_)
+        return;
+
+    const std::size_t nodeCount = model_->nodes.size();
+    if (nodeWorldMat_.size() != nodeCount)
+    {
+        nodeWorldMat_.assign(nodeCount, QMatrix4x4());
+        nodeWorldLoc_.assign(nodeCount, QVector3D(0, 0, 0));
+        nodeInvWorldLoc_.assign(nodeCount, QVector3D(0, 0, 0));
+        nodeWorldRot_.assign(nodeCount, QQuaternion(1, 0, 0, 0));
+        nodeInvWorldRot_.assign(nodeCount, QQuaternion(1, 0, 0, 0));
+        nodeWorldScale_.assign(nodeCount, QVector3D(1, 1, 1));
+        nodeInvWorldScale_.assign(nodeCount, QVector3D(1, 1, 1));
+        for (auto& m : nodeWorldMat_)
+            m.setToIdentity();
+    }
+
+    std::vector<int> state(nodeCount, 0);
+
+    auto buildNode = [&](auto&& self, std::size_t idx) -> void
+    {
+        if (idx >= nodeCount)
+            return;
+        if (state[idx] == 2)
+            return;
+        if (state[idx] == 1)
+        {
+            nodeWorldMat_[idx].setToIdentity();
+            nodeWorldLoc_[idx] = QVector3D(0, 0, 0);
+            nodeInvWorldLoc_[idx] = QVector3D(0, 0, 0);
+            nodeWorldRot_[idx] = QQuaternion(1, 0, 0, 0);
+            nodeInvWorldRot_[idx] = QQuaternion(1, 0, 0, 0);
+            nodeWorldScale_[idx] = QVector3D(1, 1, 1);
+            nodeInvWorldScale_[idx] = QVector3D(1, 1, 1);
+            state[idx] = 2;
+            return;
+        }
+        state[idx] = 1;
+
+        const auto& n = model_->nodes[idx];
+
+        QMatrix4x4 parentWorld;
+        parentWorld.setToIdentity();
+        QVector3D parentWorldLoc(0, 0, 0);
+        QVector3D parentInvWorldLoc(0, 0, 0);
+        QQuaternion parentWorldRot(1, 0, 0, 0);
+        QQuaternion parentInvWorldRot(1, 0, 0, 0);
+        QVector3D parentWorldScale(1, 1, 1);
+        QVector3D parentInvWorldScale(1, 1, 1);
+
+        if (n.parentId >= 0 && std::size_t(n.parentId) < nodeCount && n.parentId != int(idx))
+        {
+            self(self, std::size_t(n.parentId));
+            parentWorld = nodeWorldMat_[std::size_t(n.parentId)];
+            parentWorldLoc = nodeWorldLoc_[std::size_t(n.parentId)];
+            parentInvWorldLoc = nodeInvWorldLoc_[std::size_t(n.parentId)];
+            parentWorldRot = nodeWorldRot_[std::size_t(n.parentId)];
+            parentInvWorldRot = nodeInvWorldRot_[std::size_t(n.parentId)];
+            parentWorldScale = nodeWorldScale_[std::size_t(n.parentId)];
+            parentInvWorldScale = nodeInvWorldScale_[std::size_t(n.parentId)];
+        }
+
+        const QVector3D oldWorldLoc = nodeWorldLoc_[idx];
+
+        const Vec3 defT{0, 0, 0};
+        const Vec3 defS{1, 1, 1};
+        const Vec4 defR{0, 0, 0, 1};
+
+        const Vec3 t = sampleTrackVec3(n.trackTranslation, globalTimeMs, defT, *model_);
+        const Vec3 s = sampleTrackVec3(n.trackScaling, globalTimeMs, defS, *model_);
+        Vec4 r = sampleTrackQuat(n.trackRotation, globalTimeMs, defR, *model_);
+
+        const QVector3D pivot(n.pivot.x, n.pivot.y, n.pivot.z);
+        QVector3D localLoc(t.x, t.y, t.z);
+        QVector3D localScale(s.x, s.y, s.z);
+
+        QQuaternion localRot(r.w, r.x, r.y, r.z);
+        localRot.normalize();
+
+        const bool dontT = (n.flags & NODE_DONT_INHERIT_TRANSLATION) != 0;
+        const bool dontR = (n.flags & NODE_DONT_INHERIT_ROTATION) != 0;
+        const bool dontS = (n.flags & NODE_DONT_INHERIT_SCALING) != 0;
+
+        QVector3D computedLoc = dontT ? (parentInvWorldLoc + oldWorldLoc + localLoc) : localLoc;
+
+        QVector3D computedScale = localScale;
+        if (dontS)
+        {
+            computedScale = QVector3D(parentInvWorldScale.x() * localScale.x(),
+                                      parentInvWorldScale.y() * localScale.y(),
+                                      parentInvWorldScale.z() * localScale.z());
+        }
+
+        QQuaternion computedRot = localRot;
+        if (dontR)
+        {
+            computedRot = parentInvWorldRot * computedRot;
+        }
+
+        QMatrix4x4 localM;
+        localM.setToIdentity();
+        localM.translate(computedLoc);
+        localM.translate(pivot);
+        localM.rotate(computedRot);
+        localM.scale(computedScale);
+        localM.translate(-pivot);
+
+        const QMatrix4x4 worldM = parentWorld * localM;
+        nodeWorldMat_[idx] = worldM;
+
+        const QVector4D wlp = worldM * QVector4D(pivot, 1.0f);
+        const QVector3D wl(wlp.x(), wlp.y(), wlp.z());
+        nodeWorldLoc_[idx] = wl;
+        nodeInvWorldLoc_[idx] = -wl;
+
+        nodeWorldRot_[idx] = parentWorldRot * computedRot;
+        nodeWorldRot_[idx].normalize();
+        nodeInvWorldRot_[idx] = nodeWorldRot_[idx].conjugated();
+
+        const QVector3D ws(parentWorldScale.x() * computedScale.x(),
+                           parentWorldScale.y() * computedScale.y(),
+                           parentWorldScale.z() * computedScale.z());
+        nodeWorldScale_[idx] = ws;
+
+        auto invSafe = [](float v) -> float { return (std::fabs(v) > 1e-8f) ? (1.0f / v) : 0.0f; };
+        nodeInvWorldScale_[idx] = QVector3D(invSafe(ws.x()), invSafe(ws.y()), invSafe(ws.z()));
+
+        state[idx] = 2;
+    };
+
+    for (std::size_t i = 0; i < nodeCount; ++i)
+        buildNode(buildNode, i);
+}
+
 void GLModelView::updateSkinning(std::uint32_t globalTimeMs)
 {
     if (!model_)
@@ -985,105 +1138,7 @@ void GLModelView::updateSkinning(std::uint32_t globalTimeMs)
     if (skinnedVertices_.size() != model_->bindVertices.size())
         skinnedVertices_ = model_->bindVertices;
 
-    const std::size_t nodeCount = model_->nodes.size();
-    std::vector<QMatrix4x4> nodeWorld(nodeCount);
-    std::vector<int> state(nodeCount, 0);
-
-    auto adjustParentForChild = [&](const QMatrix4x4& parent, std::uint32_t flags) -> QMatrix4x4
-    {
-        const bool inheritT = (flags & NODE_DONT_INHERIT_TRANSLATION) == 0;
-        const bool inheritR = (flags & NODE_DONT_INHERIT_ROTATION) == 0;
-        const bool inheritS = (flags & NODE_DONT_INHERIT_SCALING) == 0;
-
-        QVector3D t(parent(0,3), parent(1,3), parent(2,3));
-        QVector3D c0(parent(0,0), parent(1,0), parent(2,0));
-        QVector3D c1(parent(0,1), parent(1,1), parent(2,1));
-        QVector3D c2(parent(0,2), parent(1,2), parent(2,2));
-
-        float sx = c0.length();
-        float sy = c1.length();
-        float sz = c2.length();
-        if (sx > 0.000001f) c0 /= sx;
-        if (sy > 0.000001f) c1 /= sy;
-        if (sz > 0.000001f) c2 /= sz;
-
-        if (!inheritR)
-        {
-            c0 = QVector3D(1,0,0);
-            c1 = QVector3D(0,1,0);
-            c2 = QVector3D(0,0,1);
-        }
-        if (!inheritS)
-        {
-            sx = 1.0f;
-            sy = 1.0f;
-            sz = 1.0f;
-        }
-        if (!inheritT)
-        {
-            t = QVector3D(0,0,0);
-        }
-
-        QMatrix4x4 out;
-        out.setToIdentity();
-        out.setColumn(0, QVector4D(c0.x()*sx, c0.y()*sx, c0.z()*sx, 0.0f));
-        out.setColumn(1, QVector4D(c1.x()*sy, c1.y()*sy, c1.z()*sy, 0.0f));
-        out.setColumn(2, QVector4D(c2.x()*sz, c2.y()*sz, c2.z()*sz, 0.0f));
-        out.setColumn(3, QVector4D(t.x(), t.y(), t.z(), 1.0f));
-        return out;
-    };
-
-    auto buildNode = [&](auto&& self, std::size_t idx) -> void
-    {
-        if (idx >= nodeCount)
-            return;
-        if (state[idx] == 2)
-            return;
-        if (state[idx] == 1)
-        {
-            nodeWorld[idx].setToIdentity();
-            state[idx] = 2;
-            return;
-        }
-        state[idx] = 1;
-
-        const auto& n = model_->nodes[idx];
-        const Vec3 defT{0,0,0};
-        const Vec3 defS{1,1,1};
-        const Vec4 defR{0,0,0,1};
-
-        const Vec3 t = sampleTrackVec3(n.trackTranslation, globalTimeMs, defT, *model_);
-        const Vec3 s = sampleTrackVec3(n.trackScaling, globalTimeMs, defS, *model_);
-        Vec4 r = sampleTrackQuat(n.trackRotation, globalTimeMs, defR, *model_);
-
-        const QVector3D pivot(n.pivot.x, n.pivot.y, n.pivot.z);
-        QQuaternion q(r.w, r.x, r.y, r.z);
-
-        QMatrix4x4 local;
-        local.setToIdentity();
-        local.translate(pivot.x() + t.x, pivot.y() + t.y, pivot.z() + t.z);
-        local.rotate(q);
-        local.scale(s.x, s.y, s.z);
-        local.translate(-pivot);
-
-        if (n.parentId >= 0 && std::size_t(n.parentId) < nodeCount)
-        {
-            self(self, std::size_t(n.parentId));
-            const QMatrix4x4 parentAdj = adjustParentForChild(
-                nodeWorld[std::size_t(n.parentId)],
-                n.flags);
-            nodeWorld[idx] = parentAdj * local;
-        }
-        else
-        {
-            nodeWorld[idx] = local;
-        }
-
-        state[idx] = 2;
-    };
-
-    for (std::size_t i = 0; i < nodeCount; ++i)
-        buildNode(buildNode, i);
+    buildNodeWorldCached(globalTimeMs);
 
     // Bone matrices in MDX skinning are indexed by the *bone list order* (BONE chunk order),
     // not by the global node/object id. Map boneIndex -> node world matrix.
@@ -1092,8 +1147,8 @@ void GLModelView::updateSkinning(std::uint32_t globalTimeMs)
     for (std::size_t bi = 0; bi < model_->boneNodeIds.size(); ++bi)
     {
         const int nodeId = model_->boneNodeIds[bi];
-        if (nodeId >= 0 && std::size_t(nodeId) < nodeWorld.size())
-            boneWorld[bi] = nodeWorld[std::size_t(nodeId)];
+        if (nodeId >= 0 && std::size_t(nodeId) < nodeWorldMat_.size())
+            boneWorld[bi] = nodeWorldMat_[std::size_t(nodeId)];
         else
             boneWorld[bi].setToIdentity();
     }
@@ -1111,7 +1166,7 @@ void GLModelView::updateSkinning(std::uint32_t globalTimeMs)
             skinIndicesAreBoneIndices = false;
     }
 
-    const std::vector<QMatrix4x4>& skinMats = skinIndicesAreBoneIndices ? boneWorld : nodeWorld;
+    const std::vector<QMatrix4x4>& skinMats = skinIndicesAreBoneIndices ? boneWorld : nodeWorldMat_;
 
 
     // Warcraft 3 classic MDX (v800) uses "matrix groups" (a jagged list of node indices) without
@@ -1268,169 +1323,19 @@ void GLModelView::dumpCpuSkinCheck(const QString& outPath, int geosetIndex)
     ts << modelName << "_cpu_skin_check\n";
 
     const std::uint32_t tBind = model_->sequences.empty() ? 0 : model_->sequences[0].startMs;
-
-    auto buildNodeWorld = [&](std::uint32_t timeMs,
-                              std::vector<QMatrix4x4>& nodeWorld,
-                              std::vector<QVector3D>& nodeWorldLoc,
-                              std::vector<QVector3D>& nodeInvWorldLoc,
-                              std::vector<QQuaternion>& nodeWorldRot,
-                              std::vector<QQuaternion>& nodeInvWorldRot,
-                              std::vector<QVector3D>& nodeWorldScale,
-                              std::vector<QVector3D>& nodeInvWorldScale)
+    std::uint32_t tAnim = tBind;
+    if (!model_->sequences.empty())
     {
-        const std::size_t nodeCount = model_->nodes.size();
-        nodeWorld.assign(nodeCount, QMatrix4x4());
-        nodeWorldLoc.assign(nodeCount, QVector3D(0, 0, 0));
-        nodeInvWorldLoc.assign(nodeCount, QVector3D(0, 0, 0));
-        nodeWorldRot.assign(nodeCount, QQuaternion());
-        nodeInvWorldRot.assign(nodeCount, QQuaternion());
-        nodeWorldScale.assign(nodeCount, QVector3D(1, 1, 1));
-        nodeInvWorldScale.assign(nodeCount, QVector3D(1, 1, 1));
+        const auto& seq = model_->sequences[0];
+        if (seq.endMs > seq.startMs)
+            tAnim = seq.startMs + (seq.endMs - seq.startMs) / 2;
+    }
 
-        for (std::size_t i = 0; i < nodeCount; ++i)
-        {
-            nodeWorld[i].setToIdentity();
-            nodeWorldRot[i] = QQuaternion(1, 0, 0, 0);
-            nodeInvWorldRot[i] = QQuaternion(1, 0, 0, 0);
-        }
+    buildNodeWorldCached(tBind);
+    const std::vector<QMatrix4x4> nodeWorldBind = nodeWorldMat_;
 
-        std::vector<int> state(nodeCount, 0);
-
-        auto buildNode = [&](auto&& self, std::size_t idx) -> void
-        {
-            if (idx >= nodeCount)
-                return;
-            if (state[idx] == 2)
-                return;
-            if (state[idx] == 1)
-            {
-                nodeWorld[idx].setToIdentity();
-                nodeWorldLoc[idx] = QVector3D(0, 0, 0);
-                nodeInvWorldLoc[idx] = QVector3D(0, 0, 0);
-                nodeWorldRot[idx] = QQuaternion(1, 0, 0, 0);
-                nodeInvWorldRot[idx] = QQuaternion(1, 0, 0, 0);
-                nodeWorldScale[idx] = QVector3D(1, 1, 1);
-                nodeInvWorldScale[idx] = QVector3D(1, 1, 1);
-                state[idx] = 2;
-                return;
-            }
-            state[idx] = 1;
-
-            const auto& n = model_->nodes[idx];
-
-            QMatrix4x4 parentWorld;
-            parentWorld.setToIdentity();
-            QVector3D parentWorldLoc(0, 0, 0);
-            QVector3D parentInvWorldLoc(0, 0, 0);
-            QQuaternion parentWorldRot(1, 0, 0, 0);
-            QQuaternion parentInvWorldRot(1, 0, 0, 0);
-            QVector3D parentWorldScale(1, 1, 1);
-            QVector3D parentInvWorldScale(1, 1, 1);
-
-            if (n.parentId >= 0 && std::size_t(n.parentId) < nodeCount && n.parentId != int(idx))
-            {
-                self(self, std::size_t(n.parentId));
-                parentWorld = nodeWorld[std::size_t(n.parentId)];
-                parentWorldLoc = nodeWorldLoc[std::size_t(n.parentId)];
-                parentInvWorldLoc = nodeInvWorldLoc[std::size_t(n.parentId)];
-                parentWorldRot = nodeWorldRot[std::size_t(n.parentId)];
-                parentInvWorldRot = nodeInvWorldRot[std::size_t(n.parentId)];
-                parentWorldScale = nodeWorldScale[std::size_t(n.parentId)];
-                parentInvWorldScale = nodeInvWorldScale[std::size_t(n.parentId)];
-            }
-
-            const QVector3D oldWorldLoc = nodeWorldLoc[idx];
-
-            const Vec3 defT{0, 0, 0};
-            const Vec3 defS{1, 1, 1};
-            const Vec4 defR{0, 0, 0, 1};
-
-            const Vec3 t = sampleTrackVec3(n.trackTranslation, timeMs, defT, *model_);
-            const Vec3 s = sampleTrackVec3(n.trackScaling, timeMs, defS, *model_);
-            Vec4 r = sampleTrackQuat(n.trackRotation, timeMs, defR, *model_);
-
-            const QVector3D pivot(n.pivot.x, n.pivot.y, n.pivot.z);
-            QVector3D localLoc(t.x, t.y, t.z);
-            QVector3D localScale(s.x, s.y, s.z);
-
-            QQuaternion localRot(r.w, r.x, r.y, r.z);
-            localRot.normalize();
-
-            const bool dontT = (n.flags & NODE_DONT_INHERIT_TRANSLATION) != 0;
-            const bool dontR = (n.flags & NODE_DONT_INHERIT_ROTATION) != 0;
-            const bool dontS = (n.flags & NODE_DONT_INHERIT_SCALING) != 0;
-
-            QVector3D computedLoc = dontT ? (parentInvWorldLoc + oldWorldLoc + localLoc) : localLoc;
-
-            QVector3D computedScale = localScale;
-            if (dontS)
-            {
-                computedScale = QVector3D(parentInvWorldScale.x() * localScale.x(),
-                                          parentInvWorldScale.y() * localScale.y(),
-                                          parentInvWorldScale.z() * localScale.z());
-            }
-
-            QQuaternion computedRot = localRot;
-            if (dontR)
-            {
-                computedRot = parentInvWorldRot * computedRot;
-            }
-
-            QMatrix4x4 localM;
-            localM.setToIdentity();
-            localM.translate(computedLoc);
-            localM.translate(pivot);
-            localM.rotate(computedRot);
-            localM.scale(computedScale);
-            localM.translate(-pivot);
-
-            const QMatrix4x4 worldM = parentWorld * localM;
-            nodeWorld[idx] = worldM;
-
-            const QVector4D wlp = worldM * QVector4D(pivot, 1.0f);
-            const QVector3D wl(wlp.x(), wlp.y(), wlp.z());
-            nodeWorldLoc[idx] = wl;
-            nodeInvWorldLoc[idx] = -wl;
-
-            nodeWorldRot[idx] = parentWorldRot * computedRot;
-            nodeWorldRot[idx].normalize();
-            nodeInvWorldRot[idx] = nodeWorldRot[idx].conjugated();
-
-            const QVector3D ws(parentWorldScale.x() * computedScale.x(),
-                               parentWorldScale.y() * computedScale.y(),
-                               parentWorldScale.z() * computedScale.z());
-            nodeWorldScale[idx] = ws;
-
-            auto invSafe = [](float v) -> float { return (std::fabs(v) > 1e-8f) ? (1.0f / v) : 0.0f; };
-            nodeInvWorldScale[idx] = QVector3D(invSafe(ws.x()), invSafe(ws.y()), invSafe(ws.z()));
-
-            state[idx] = 2;
-        };
-
-        for (std::size_t i = 0; i < nodeCount; ++i)
-            buildNode(buildNode, i);
-    };
-
-    std::vector<QMatrix4x4> nodeWorldBind;
-    std::vector<QVector3D> nodeWorldLocBind;
-    std::vector<QVector3D> nodeInvWorldLocBind;
-    std::vector<QQuaternion> nodeWorldRotBind;
-    std::vector<QQuaternion> nodeInvWorldRotBind;
-    std::vector<QVector3D> nodeWorldScaleBind;
-    std::vector<QVector3D> nodeInvWorldScaleBind;
-
-    std::vector<QMatrix4x4> nodeWorldAnim;
-    std::vector<QVector3D> nodeWorldLocAnim;
-    std::vector<QVector3D> nodeInvWorldLocAnim;
-    std::vector<QQuaternion> nodeWorldRotAnim;
-    std::vector<QQuaternion> nodeInvWorldRotAnim;
-    std::vector<QVector3D> nodeWorldScaleAnim;
-    std::vector<QVector3D> nodeInvWorldScaleAnim;
-
-    buildNodeWorld(tBind, nodeWorldBind, nodeWorldLocBind, nodeInvWorldLocBind,
-                   nodeWorldRotBind, nodeInvWorldRotBind, nodeWorldScaleBind, nodeInvWorldScaleBind);
-    buildNodeWorld(tBind, nodeWorldAnim, nodeWorldLocAnim, nodeInvWorldLocAnim,
-                   nodeWorldRotAnim, nodeInvWorldRotAnim, nodeWorldScaleAnim, nodeInvWorldScaleAnim);
+    buildNodeWorldCached(tAnim);
+    const std::vector<QMatrix4x4> nodeWorldAnim = nodeWorldMat_;
 
     auto buildBoneWorld = [&](const std::vector<QMatrix4x4>& nodeWorld, std::vector<QMatrix4x4>& boneWorld)
     {
@@ -1475,6 +1380,7 @@ void GLModelView::dumpCpuSkinCheck(const QString& outPath, int geosetIndex)
     }
 
     ts << "tBind=" << tBind << " ms\n";
+    ts << "tAnim=" << tAnim << " ms\n";
     ts << "skinIndicesAreBoneIndices=" << (skinIndicesAreBoneIndices ? "true" : "false") << "\n";
     ts << "nodeCount=" << model_->nodes.size() << " boneCount=" << model_->boneNodeIds.size() << "\n";
 

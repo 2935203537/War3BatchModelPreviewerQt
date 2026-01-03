@@ -65,6 +65,7 @@ private:
     void drawDebug(const QMatrix4x4& mvp);
     void setGlPhase(const char* phase);
     void updateSkinning(std::uint32_t globalTimeMs);
+    void buildNodeWorldCached(std::uint32_t globalTimeMs);
 
     GLuint getOrCreateTexture(std::uint32_t textureId);
     struct TextureResolve
@@ -165,6 +166,15 @@ private:
     QMatrix4x4 proj_;
     int viewportW_ = 1;
     int viewportH_ = 1;
+
+    // Persistent node transforms (for DontInheritTranslation logic)
+    std::vector<QMatrix4x4> nodeWorldMat_;
+    std::vector<QVector3D> nodeWorldLoc_;
+    std::vector<QQuaternion> nodeWorldRot_;
+    std::vector<QVector3D> nodeWorldScale_;
+    std::vector<QVector3D> nodeInvWorldLoc_;
+    std::vector<QQuaternion> nodeInvWorldRot_;
+    std::vector<QVector3D> nodeInvWorldScale_;
 
     // ---- Animation state ----
     float playbackSpeed_ = 1.0f;
