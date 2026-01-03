@@ -492,6 +492,7 @@ void GLModelView::setCurrentSequence(int seqIndex)
     const int maxIndex = int(model_->sequences.size()) - 1;
     currentSeq_ = std::max(0, std::min(seqIndex, maxIndex));
     localTimeMs_ = 0;
+    invalidateBindCache();
 }
 
 void GLModelView::setForceParticleVisible(bool enabled)
@@ -635,6 +636,7 @@ void GLModelView::setModel(std::optional<ModelData> model, const QString& displa
         for (auto& m : nodeWorldMat_)
             m.setToIdentity();
     }
+    invalidateBindCache();
 
     // Reset texture cache (textures are tied to model/material IDs)
     if (context() && context()->isValid())
@@ -1365,6 +1367,63 @@ void GLModelView::buildNodeWorldCached(std::uint32_t globalTimeMs)
         buildNode(buildNode, i);
 }
 
+void GLModelView::invalidateBindCache()
+{
+    bindCacheSeq_ = -1;
+    invBindNodes_.clear();
+    invBindBones_.clear();
+}
+
+void GLModelView::ensureBindCache()
+{
+    if (!model_)
+        return;
+
+    int seqIndex = 0;
+    if (!model_->sequences.empty())
+    {
+        seqIndex = std::max(0, std::min(int(model_->sequences.size()) - 1, currentSeq_));
+    }
+
+    if (bindCacheSeq_ == seqIndex &&
+        invBindNodes_.size() == nodeWorldMat_.size() &&
+        invBindBones_.size() == model_->boneNodeIds.size())
+    {
+        return;
+    }
+
+    const std::uint32_t tBind =
+        model_->sequences.empty() ? 0u : model_->sequences[std::size_t(seqIndex)].startMs;
+
+    buildNodeWorldCached(tBind);
+
+    invBindNodes_.resize(nodeWorldMat_.size());
+    for (std::size_t i = 0; i < nodeWorldMat_.size(); ++i)
+    {
+        bool ok = true;
+        invBindNodes_[i] = nodeWorldMat_[i].inverted(&ok);
+        if (!ok)
+            invBindNodes_[i].setToIdentity();
+    }
+
+    invBindBones_.resize(model_->boneNodeIds.size());
+    for (std::size_t bi = 0; bi < model_->boneNodeIds.size(); ++bi)
+    {
+        const int nodeId = model_->boneNodeIds[bi];
+        QMatrix4x4 bindW;
+        bindW.setToIdentity();
+        if (nodeId >= 0 && std::size_t(nodeId) < nodeWorldMat_.size())
+            bindW = nodeWorldMat_[std::size_t(nodeId)];
+
+        bool ok = true;
+        invBindBones_[bi] = bindW.inverted(&ok);
+        if (!ok)
+            invBindBones_[bi].setToIdentity();
+    }
+
+    bindCacheSeq_ = seqIndex;
+}
+
 void GLModelView::updateSkinning(std::uint32_t globalTimeMs)
 {
     if (!model_)
@@ -1379,20 +1438,8 @@ void GLModelView::updateSkinning(std::uint32_t globalTimeMs)
     if (skinnedVertices_.size() != model_->bindVertices.size())
         skinnedVertices_ = model_->bindVertices;
 
+    ensureBindCache();
     buildNodeWorldCached(globalTimeMs);
-
-    // Bone matrices in MDX skinning are indexed by the *bone list order* (BONE chunk order),
-    // not by the global node/object id. Map boneIndex -> node world matrix.
-    std::vector<QMatrix4x4> boneWorld;
-    boneWorld.resize(model_->boneNodeIds.size());
-    for (std::size_t bi = 0; bi < model_->boneNodeIds.size(); ++bi)
-    {
-        const int nodeId = model_->boneNodeIds[bi];
-        if (nodeId >= 0 && std::size_t(nodeId) < nodeWorldMat_.size())
-            boneWorld[bi] = nodeWorldMat_[std::size_t(nodeId)];
-        else
-            boneWorld[bi].setToIdentity();
-    }
 
     // Heuristic: most WC3 MDX files store MATS indices as bone indices (BONE chunk order).
     // Some non-standard exporters may store global node ids instead. Detect this once.
@@ -1409,18 +1456,37 @@ void GLModelView::updateSkinning(std::uint32_t globalTimeMs)
         }
     }
 
-    bool skinIndicesAreBoneIndices = boneMapIsIdentity && !boneWorld.empty();
+    bool skinIndicesAreBoneIndices = boneMapIsIdentity && !model_->boneNodeIds.empty();
     if (skinIndicesAreBoneIndices)
     {
         int maxIdx = -1;
         for (const auto& g : model_->skinGroups)
             for (int idx : g.nodeIndices)
                 if (idx > maxIdx) maxIdx = idx;
-        if (maxIdx >= int(boneWorld.size()))
+        if (maxIdx >= int(model_->boneNodeIds.size()))
             skinIndicesAreBoneIndices = false;
     }
 
-    const std::vector<QMatrix4x4>& skinMats = skinIndicesAreBoneIndices ? boneWorld : nodeWorldMat_;
+    std::vector<QMatrix4x4> skinMats;
+    if (skinIndicesAreBoneIndices)
+    {
+        skinMats.resize(model_->boneNodeIds.size());
+        for (std::size_t bi = 0; bi < model_->boneNodeIds.size(); ++bi)
+        {
+            const int nodeId = model_->boneNodeIds[bi];
+            QMatrix4x4 animW;
+            animW.setToIdentity();
+            if (nodeId >= 0 && std::size_t(nodeId) < nodeWorldMat_.size())
+                animW = nodeWorldMat_[std::size_t(nodeId)];
+            skinMats[bi] = animW * invBindBones_[bi];
+        }
+    }
+    else
+    {
+        skinMats.resize(nodeWorldMat_.size());
+        for (std::size_t i = 0; i < nodeWorldMat_.size(); ++i)
+            skinMats[i] = nodeWorldMat_[i] * invBindNodes_[i];
+    }
 
 
     // Warcraft 3 classic MDX (v800) uses "matrix groups" (a jagged list of node indices) without
@@ -1576,11 +1642,16 @@ void GLModelView::dumpCpuSkinCheck(const QString& outPath, int geosetIndex)
                                   : (modelPath_.isEmpty() ? QString("<model>") : QFileInfo(modelPath_).fileName());
     ts << modelName << "_cpu_skin_check\n";
 
-    const std::uint32_t tBind = model_->sequences.empty() ? 0 : model_->sequences[0].startMs;
+    int seqIndex = 0;
+    if (!model_->sequences.empty())
+        seqIndex = std::max(0, std::min(int(model_->sequences.size()) - 1, currentSeq_));
+
+    const std::uint32_t tBind =
+        model_->sequences.empty() ? 0u : model_->sequences[std::size_t(seqIndex)].startMs;
     std::uint32_t tAnim = tBind;
     if (!model_->sequences.empty())
     {
-        const auto& seq = model_->sequences[0];
+        const auto& seq = model_->sequences[std::size_t(seqIndex)];
         if (seq.endMs > seq.startMs)
             tAnim = seq.startMs + (seq.endMs - seq.startMs) / 2;
     }
@@ -1646,6 +1717,7 @@ void GLModelView::dumpCpuSkinCheck(const QString& outPath, int geosetIndex)
         skinMats[i] = animMats[i] * invBind;
     }
 
+    ts << "seqIndex=" << seqIndex << "\n";
     ts << "tBind=" << tBind << " ms\n";
     ts << "tAnim=" << tAnim << " ms\n";
     ts << "skinIndicesAreBoneIndices=" << (skinIndicesAreBoneIndices ? "true" : "false") << "\n";

@@ -68,6 +68,8 @@ private:
     void setGlPhase(const char* phase);
     void updateSkinning(std::uint32_t globalTimeMs);
     void buildNodeWorldCached(std::uint32_t globalTimeMs);
+    void invalidateBindCache();
+    void ensureBindCache();
 
     GLuint getOrCreateTexture(std::uint32_t textureId);
     struct TextureResolve
@@ -179,6 +181,11 @@ private:
     std::vector<QVector3D> nodeInvWorldLoc_;
     std::vector<QQuaternion> nodeInvWorldRot_;
     std::vector<QVector3D> nodeInvWorldScale_;
+
+    // --- Skinning bind-pose cache (invBind) ---
+    int bindCacheSeq_ = -1;
+    std::vector<QMatrix4x4> invBindNodes_; // size = nodeWorldMat_.size()
+    std::vector<QMatrix4x4> invBindBones_; // size = model_->boneNodeIds.size()
 
     // ---- Animation state ----
     float playbackSpeed_ = 1.0f;
