@@ -88,6 +88,232 @@ namespace
         result.error = err;
         return result;
     }
+
+    static QString filterModeName(std::uint32_t mode)
+    {
+        switch (mode)
+        {
+        case 0: return "None";
+        case 1: return "Transparent";
+        case 2: return "Blend";
+        case 3: return "Additive";
+        case 4: return "AddAlpha";
+        case 5: return "Modulate";
+        case 6: return "Modulate2x";
+        default: return "Blend";
+        }
+    }
+
+    static void writeMdxAsMdl(const ModelData& model, const QString& path, const QString& name)
+    {
+        QFile f(path);
+        if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text))
+            return;
+
+        QTextStream ts(&f);
+        const int formatVersion = (model.mdxVersion >= 1000) ? 1000 : 800;
+        ts << "Version {\n\tFormatVersion " << formatVersion << ",\n}\n";
+        ts << "Model \"" << name << "\" {\n";
+        ts << "\tNumGeosets " << model.geosetDiagnostics.size() << ",\n";
+        ts << "\tNumGeosetAnims 0,\n";
+
+        int bones = 0, helpers = 0, attachments = 0;
+        for (const auto& n : model.nodes)
+        {
+            if (n.type == "BONE")
+                bones++;
+            else if (n.type == "HELP")
+                helpers++;
+            else if (n.type == "ATCH")
+                attachments++;
+            else
+                helpers++;
+        }
+        if (bones > 0) ts << "\tNumBones " << bones << ",\n";
+        if (helpers > 0) ts << "\tNumHelpers " << helpers << ",\n";
+        if (attachments > 0) ts << "\tNumAttachments " << attachments << ",\n";
+
+        if (model.hasBounds)
+        {
+            ts << "\tMinimumExtent { " << model.boundsMin[0] << ", " << model.boundsMin[1] << ", " << model.boundsMin[2] << " },\n";
+            ts << "\tMaximumExtent { " << model.boundsMax[0] << ", " << model.boundsMax[1] << ", " << model.boundsMax[2] << " },\n";
+        }
+        ts << "}\n";
+
+        if (!model.sequences.empty())
+        {
+            ts << "Sequences " << model.sequences.size() << " {\n";
+            for (const auto& s : model.sequences)
+            {
+                ts << "\tAnim \"" << QString::fromStdString(s.name) << "\" {\n";
+                ts << "\t\tInterval { " << s.startMs << ", " << s.endMs << " },\n";
+                if (s.flags & 1)
+                    ts << "\t\tNonLooping,\n";
+                ts << "\t}\n";
+            }
+            ts << "}\n";
+        }
+
+        if (!model.textures.empty())
+        {
+            ts << "Textures " << model.textures.size() << " {\n";
+            for (const auto& t : model.textures)
+            {
+                ts << "\tBitmap {\n";
+                if (!t.fileName.empty())
+                    ts << "\t\tImage \"" << QString::fromStdString(t.fileName) << "\",\n";
+                if (t.replaceableId != 0)
+                    ts << "\t\tReplaceableId " << t.replaceableId << ",\n";
+                ts << "\t\tWrapWidth,\n\t\tWrapHeight,\n";
+                ts << "\t}\n";
+            }
+            ts << "}\n";
+        }
+
+        if (!model.materials.empty())
+        {
+            ts << "Materials " << model.materials.size() << " {\n";
+            for (const auto& m : model.materials)
+            {
+                ts << "\tMaterial {\n";
+                ts << "\t\tLayer {\n";
+                ts << "\t\t\tFilterMode " << filterModeName(m.layer.filterMode) << ",\n";
+                ts << "\t\t\tstatic TextureID " << m.layer.textureId << ",\n";
+                ts << "\t\t\tAlpha " << m.layer.alpha << ",\n";
+                ts << "\t\t}\n";
+                ts << "\t}\n";
+            }
+            ts << "}\n";
+        }
+
+        for (std::size_t gi = 0; gi < model.geosetDiagnostics.size(); ++gi)
+        {
+            const auto& gd = model.geosetDiagnostics[gi];
+            ts << "Geoset {\n";
+            ts << "\tVertices " << gd.vertexCount << " {\n";
+            for (std::uint32_t i = 0; i < gd.vertexCount; ++i)
+            {
+                const auto& v = model.vertices[gd.baseVertex + i];
+                ts << "\t\t{ " << v.px << ", " << v.py << ", " << v.pz << " },\n";
+            }
+            ts << "\t}\n";
+            ts << "\tNormals " << gd.vertexCount << " {\n";
+            for (std::uint32_t i = 0; i < gd.vertexCount; ++i)
+            {
+                const auto& v = model.vertices[gd.baseVertex + i];
+                ts << "\t\t{ " << v.nx << ", " << v.ny << ", " << v.nz << " },\n";
+            }
+            ts << "\t}\n";
+            ts << "\tTVertices " << gd.vertexCount << " {\n";
+            for (std::uint32_t i = 0; i < gd.vertexCount; ++i)
+            {
+                const auto& v = model.vertices[gd.baseVertex + i];
+                ts << "\t\t{ " << v.u << ", " << v.v << " },\n";
+            }
+            ts << "\t}\n";
+
+            ts << "\tVertexGroup {\n";
+            for (std::uint8_t vg : gd.gndx)
+                ts << "\t\t" << int(vg) << ",\n";
+            ts << "\t}\n";
+
+            ts << "\tFaces 1 " << gd.indexCount << " {\n\t\tTriangles {\n\t\t\t{ ";
+            for (std::uint32_t i = 0; i < gd.indexCount; ++i)
+            {
+                const std::uint32_t idx = model.indices[gd.indexOffset + i] - gd.baseVertex;
+                ts << idx;
+                if (i + 1 < gd.indexCount)
+                    ts << ", ";
+            }
+            ts << " },\n\t\t}\n\t}\n";
+
+            ts << "\tGroups " << gd.mtgc.size() << " " << gd.mats.size() << " {\n";
+            if (!gd.expandedGroups.empty())
+            {
+                for (const auto& group : gd.expandedGroups)
+                {
+                    ts << "\t\tMatrices { ";
+                    for (int i = 0; i < int(group.size()); ++i)
+                    {
+                        ts << group[std::size_t(i)];
+                        if (i + 1 < int(group.size()))
+                            ts << ", ";
+                    }
+                    ts << " },\n";
+                }
+            }
+            else
+            {
+                std::size_t offset = 0;
+                for (std::uint32_t sz : gd.mtgc)
+                {
+                    ts << "\t\tMatrices { ";
+                    for (std::uint32_t k = 0; k < sz && offset < gd.mats.size(); ++k, ++offset)
+                    {
+                        ts << gd.mats[offset];
+                        if (k + 1 < sz && offset + 1 < gd.mats.size())
+                            ts << ", ";
+                    }
+                    ts << " },\n";
+                }
+            }
+            ts << "\t}\n";
+            ts << "\tMaterialID " << gd.materialId << ",\n";
+            ts << "\tSelectionGroup 0,\n";
+            ts << "}\n";
+        }
+
+        if (!model.nodes.empty())
+        {
+            for (const auto& n : model.nodes)
+            {
+                QString type = QString::fromStdString(n.type);
+                if (type.isEmpty())
+                    type = "Helper";
+                if (type == "BONE")
+                    type = "Bone";
+                else if (type == "HELP")
+                    type = "Helper";
+                else if (type == "ATCH")
+                    type = "Attachment";
+                else
+                    type = "Helper";
+
+                const QString nodeName = QString::fromStdString(n.name);
+                ts << type << " \"" << nodeName << "\" {\n";
+                ts << "\tObjectId " << n.nodeId << ",\n";
+                if (n.parentId >= 0)
+                    ts << "\tParent " << n.parentId << ",\n";
+                ts << "\tPivotPoint { " << n.pivot.x << ", " << n.pivot.y << ", " << n.pivot.z << " },\n";
+                if (type == "Bone")
+                {
+                    ts << "\tGeosetId -1,\n";
+                    ts << "\tGeosetAnimId -1,\n";
+                }
+                if (type == "Attachment")
+                {
+                    ts << "\tPath \"\",\n";
+                    ts << "\tAttachmentID 0,\n";
+                }
+                ts << "}\n";
+            }
+        }
+
+        if (!model.pivots.empty())
+        {
+            ts << "PivotPoints " << model.pivots.size() << " {\n";
+            for (const auto& p : model.pivots)
+                ts << "\t{ " << p.x << ", " << p.y << ", " << p.z << " },\n";
+            ts << "}\n";
+        }
+        else if (!model.nodes.empty())
+        {
+            ts << "PivotPoints " << model.nodes.size() << " {\n";
+            for (const auto& n : model.nodes)
+                ts << "\t{ " << n.pivot.x << ", " << n.pivot.y << ", " << n.pivot.z << " },\n";
+            ts << "}\n";
+        }
+    }
 }
 
 MainWindow::MainWindow(QWidget* parent)
@@ -679,6 +905,10 @@ void MainWindow::exportDiagnostics()
                 {
                     const auto& gd = model->geosetDiagnostics[gi];
                     ts << "\n[Geoset " << gi << "]\n";
+                    ts << "materialId: " << gd.materialId
+                       << " | verts: " << gd.vertexCount
+                       << " | tris: " << gd.triCount
+                       << " | maxGNDX: " << gd.maxVertexGroup << "\n";
                     ts << "GNDX count: " << gd.gndx.size() << "\n";
                     ts << "MTGC count: " << gd.mtgc.size() << "\n";
                     ts << "MATS count: " << gd.mats.size() << "\n";
@@ -749,6 +979,10 @@ void MainWindow::exportDiagnostics()
                        << " | parent=" << n.parentId
                        << " | pivot=(" << n.pivot.x << ", " << n.pivot.y << ", " << n.pivot.z << ")\n";
                 }
+
+                const QString mdlOut = QDir(diagDir).filePath(QString("%1_from_mdx.mdl")
+                                                                  .arg(QFileInfo(selectedPath).completeBaseName()));
+                writeMdxAsMdl(*model, mdlOut, QFileInfo(selectedPath).fileName());
             }
         }
     }

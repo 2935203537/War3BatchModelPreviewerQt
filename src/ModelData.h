@@ -142,6 +142,13 @@ struct ModelData
         std::vector<std::uint32_t> mtgc;
         std::vector<std::int32_t> mats;
         std::vector<std::vector<std::int32_t>> expandedGroups;
+        std::uint32_t materialId = 0;
+        std::uint32_t vertexCount = 0;
+        std::uint32_t triCount = 0;
+        std::uint32_t maxVertexGroup = 0;
+        std::uint32_t baseVertex = 0;
+        std::uint32_t indexOffset = 0;
+        std::uint32_t indexCount = 0;
     };
     std::vector<GeosetDiagnostics> geosetDiagnostics;
 

@@ -246,6 +246,7 @@ namespace
         std::vector<std::uint32_t> mtgcRaw;
         std::vector<std::int32_t> matsRaw;
         std::vector<std::vector<std::int32_t>> expandedGroups;
+        std::uint32_t maxVertexGroup = 0;
     };
 
     static bool parseGeoset(Reader& r, quint32 inclusiveSize, quint32 mdxVersion, GeosetParsed& out, QString* outError)
@@ -367,6 +368,9 @@ namespace
             out.vertexGroups[i] = std::uint8_t(v);
         }
         out.gndxRaw = out.vertexGroups;
+        out.maxVertexGroup = 0;
+        for (std::uint8_t vg : out.vertexGroups)
+            out.maxVertexGroup = std::max(out.maxVertexGroup, std::uint32_t(vg));
 
         // MTGC (matrix group sizes)
         quint32 matrixGroupCount = 0;
@@ -1249,13 +1253,18 @@ namespace MdxLoader
                     diag.mtgc = std::move(gs.mtgcRaw);
                     diag.mats = std::move(gs.matsRaw);
                     diag.expandedGroups = std::move(gs.expandedGroups);
+                    diag.materialId = gs.materialId;
+                    diag.vertexCount = static_cast<std::uint32_t>(gs.vertices.size());
+                    diag.triCount = static_cast<std::uint32_t>(gs.triIndices.size() / 3);
+                    diag.maxVertexGroup = gs.maxVertexGroup;
+                    const std::uint32_t baseVertex = static_cast<std::uint32_t>(model.vertices.size());
+                    const std::uint32_t indexOffset = static_cast<std::uint32_t>(model.indices.size());
+                    diag.baseVertex = baseVertex;
+                    diag.indexOffset = indexOffset;
                     model.geosetDiagnostics.push_back(std::move(diag));
 
                     if (gs.vertices.empty() || gs.triIndices.empty())
                         continue;
-
-                    const std::uint32_t baseVertex = static_cast<std::uint32_t>(model.vertices.size());
-                    const std::uint32_t indexOffset = static_cast<std::uint32_t>(model.indices.size());
 
                     // Append vertices
                     model.vertices.insert(model.vertices.end(), gs.vertices.begin(), gs.vertices.end());
@@ -1287,6 +1296,12 @@ namespace MdxLoader
                         model.indices.push_back(baseVertex + idx);
 
                     const std::uint32_t indexCount = static_cast<std::uint32_t>(model.indices.size()) - indexOffset;
+                    if (!model.geosetDiagnostics.empty())
+                    {
+                        auto& last = model.geosetDiagnostics.back();
+                        last.indexCount = indexCount;
+                        last.triCount = indexCount / 3;
+                    }
 
                     SubMesh sm;
                     sm.indexOffset = indexOffset;
