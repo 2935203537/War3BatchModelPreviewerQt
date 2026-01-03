@@ -953,6 +953,25 @@ void MainWindow::exportDiagnostics()
                     ts << "Expanded groups:\n";
                     for (std::size_t g = 0; g < gd.expandedGroups.size(); ++g)
                         ts << "  [" << g << "] {" << joinI32(gd.expandedGroups[g]) << "}\n";
+
+                    // Interpret expanded groups as bone indices (BONE chunk order) and resolve to node ids.
+                    if (!model->boneNodeIds.empty())
+                    {
+                        ts << "Expanded groups resolved (boneIndex->nodeId):\n";
+                        for (std::size_t g = 0; g < gd.expandedGroups.size(); ++g)
+                        {
+                            QStringList out;
+                            out.reserve(int(gd.expandedGroups[g].size()));
+                            for (auto bi : gd.expandedGroups[g])
+                            {
+                                if (bi >= 0 && std::size_t(bi) < model->boneNodeIds.size())
+                                    out << QString::number(model->boneNodeIds[std::size_t(bi)]);
+                                else
+                                    out << QString::number(bi);
+                            }
+                            ts << "  [" << g << "] {" << out.join(", ") << "}\n";
+                        }
+                    }
                 }
 
                 for (std::uint16_t gid : model->vertexGroups)

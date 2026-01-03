@@ -1083,6 +1083,35 @@ void GLModelView::updateSkinning(std::uint32_t globalTimeMs)
     for (std::size_t i = 0; i < nodeCount; ++i)
         buildNode(buildNode, i);
 
+    // Bone matrices in MDX skinning are indexed by the *bone list order* (BONE chunk order),
+    // not by the global node/object id. Map boneIndex -> node world matrix.
+    std::vector<QMatrix4x4> boneWorld;
+    boneWorld.resize(model_->boneNodeIds.size());
+    for (std::size_t bi = 0; bi < model_->boneNodeIds.size(); ++bi)
+    {
+        const int nodeId = model_->boneNodeIds[bi];
+        if (nodeId >= 0 && std::size_t(nodeId) < nodeWorld.size())
+            boneWorld[bi] = nodeWorld[std::size_t(nodeId)];
+        else
+            boneWorld[bi].setToIdentity();
+    }
+
+    // Heuristic: most WC3 MDX files store MATS indices as bone indices (BONE chunk order).
+    // Some non-standard exporters may store global node ids instead. Detect this once.
+    bool skinIndicesAreBoneIndices = !boneWorld.empty();
+    if (skinIndicesAreBoneIndices)
+    {
+        int maxIdx = -1;
+        for (const auto& g : model_->skinGroups)
+            for (int idx : g.nodeIndices)
+                if (idx > maxIdx) maxIdx = idx;
+        if (maxIdx >= int(boneWorld.size()))
+            skinIndicesAreBoneIndices = false;
+    }
+
+    const std::vector<QMatrix4x4>& skinMats = skinIndicesAreBoneIndices ? boneWorld : nodeWorld;
+
+
     // Warcraft 3 classic MDX (v800) uses "matrix groups" (a jagged list of node indices) without
     // explicit per-vertex weights. The common approach (and what the WC3 pipeline effectively
     // supports) is to take up to 4 matrices for the vertex group, transform the vertex by each,
@@ -1094,34 +1123,21 @@ void GLModelView::updateSkinning(std::uint32_t globalTimeMs)
 
     auto skinAverage = [&](const ModelVertex& base, const ModelData::SkinGroup& group, ModelVertex& outV) -> bool
     {
-        // WC3 SD skinning uses matrix groups without explicit weights.
-        // Most geosets need up to 4 bones per vertex, but a few use "extended vertex groups"
-        // and require up to 8 bones (mdx-m3-viewer chooses this when any MTGC entry > 4).
-        // We support up to 8 here, and average the transformed results.
+        // Warcraft 3 classic MDX (v800) uses matrix groups (a list of *bone indices*) without explicit weights.
+        // The common approach (used by mdx-m3-viewer and WC3-compatible pipelines) is:
+        //   - Take up to 4 bones for standard groups, or up to 8 bones for "extended vertex groups".
+        //   - Transform by each matrix, sum, then divide by the number of bones considered (simple average).
+        //
+        // NOTE: Do not de-duplicate indices. Some assets rely on repeated indices to bias the average.
+        // Also note that the division uses the *declared* bone count (min(groupSize, maxBones)),
+        // even if some indices are invalid and skipped, to mimic the shader behavior.
+
+        if (skinMats.empty())
+            return false;
+
         const int maxBones = (group.nodeIndices.size() > 4) ? 8 : 4;
-
-        int bones[8] = {-1,-1,-1,-1,-1,-1,-1,-1};
-        int boneCount = 0;
-        for (int idx : group.nodeIndices)
-        {
-            if (idx < 0 || std::size_t(idx) >= nodeWorld.size())
-                continue;
-
-            // Avoid duplicates (bad models sometimes repeat indices).
-            bool dup = false;
-            for (int j = 0; j < boneCount; ++j)
-            {
-                if (bones[j] == idx) { dup = true; break; }
-            }
-            if (dup)
-                continue;
-
-            bones[boneCount++] = idx;
-            if (boneCount == maxBones)
-                break;
-        }
-
-        if (boneCount <= 0)
+        const int boneNumber = std::min<int>(int(group.nodeIndices.size()), maxBones);
+        if (boneNumber <= 0)
             return false;
 
         const QVector4D p4(base.px, base.py, base.pz, 1.0f);
@@ -1129,14 +1145,19 @@ void GLModelView::updateSkinning(std::uint32_t globalTimeMs)
 
         QVector4D sumP(0,0,0,0);
         QVector4D sumN(0,0,0,0);
-        for (int i = 0; i < boneCount; ++i)
+
+        for (int i = 0; i < boneNumber; ++i)
         {
-            const QMatrix4x4& m = nodeWorld[std::size_t(bones[i])];
+            const int boneIndex = group.nodeIndices[std::size_t(i)];
+            if (boneIndex < 0 || std::size_t(boneIndex) >= skinMats.size())
+                continue;
+
+            const QMatrix4x4& m = skinMats[std::size_t(boneIndex)];
             sumP += m * p4;
             sumN += m * n4;
         }
 
-        const float inv = 1.0f / float(boneCount);
+        const float inv = 1.0f / float(boneNumber);
         const QVector4D avgP = sumP * inv;
 
         QVector3D nn(sumN.x(), sumN.y(), sumN.z());

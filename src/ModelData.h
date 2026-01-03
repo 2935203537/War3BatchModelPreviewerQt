@@ -128,6 +128,7 @@ struct ModelData
     };
 
     std::vector<Node> nodes; // indexed by nodeId when possible
+    std::vector<std::int32_t> boneNodeIds; // BONE chunk order -> nodeId
 
     struct SkinGroup
     {

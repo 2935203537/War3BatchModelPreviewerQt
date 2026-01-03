@@ -1001,6 +1001,8 @@ namespace
             }
             Q_UNUSED(geosetId);
             Q_UNUSED(geoAnimId);
+            if (node.nodeId >= 0)
+                model.boneNodeIds.push_back(node.nodeId);
             storeNode(model, std::move(node));
         }
         r.pos = startPos + qsizetype(chunkSize);
